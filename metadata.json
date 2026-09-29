@@ -1,0 +1,8 @@
+{
+  "name": "CPA Automator",
+  "description": "Autonomous CPA offer funnel execution engine with smart browser navigation, AI plan extraction, and anti-detection shield.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
