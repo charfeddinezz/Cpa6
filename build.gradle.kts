@@ -11,5 +11,20 @@ plugins {
 tasks.register("copyDebugApkToProjectRoot") {
   description = "Copies the assembled debug APK to the project root directory as app-debug.apk"
   group = "build"
-  dependsOn(":app:copyDebugApkToProjectRoot")
+  dependsOn(":app:assembleDebug")
+
+  doLast {
+    val sourceCandidates = listOf(
+      layout.projectDirectory.file("app/build/outputs/apk/debug/app-debug.apk").asFile,
+      layout.projectDirectory.file("app/build/outputs/apk/apk/debug/app-debug.apk").asFile
+    )
+    val sourceApk = sourceCandidates.firstOrNull { it.isFile }
+      ?: throw GradleException(
+        "Could not find the generated debug APK. Checked: ${sourceCandidates.joinToString()}"
+      )
+    val destination = layout.projectDirectory.file("app-debug.apk").asFile
+
+    sourceApk.copyTo(destination, overwrite = true)
+    println("DEBUG APK READY AT ROOT: ${destination.absolutePath} (${destination.length()} bytes)")
+  }
 }

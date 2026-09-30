@@ -140,36 +140,3 @@ dependencies {
   "ksp"(libs.moshi.kotlin.codegen)
 }
 
-tasks.register("copyDebugApkToProjectRoot") {
-  description = "Copies the assembled debug APK to the project root directory as app-debug.apk"
-  group = "build"
-  dependsOn("assembleDebug")
-
-  val rootDirectory = rootDir
-  val buildDirProvider = layout.buildDirectory.asFile
-
-  doLast {
-    val buildDir = buildDirProvider.get()
-    val apkFile = File(buildDir, "outputs/apk/debug/app-debug.apk")
-    val destination = File(rootDirectory, "app-debug.apk")
-
-    val sourceApk = if (apkFile.exists()) {
-      apkFile
-    } else {
-      val fallbackCandidates = listOf(
-        File(rootDirectory, "app/build/outputs/apk/apk/debug/app-debug.apk"),
-        File(rootDirectory, "app/build/outputs/apk/debug/app-debug.apk")
-      )
-      fallbackCandidates.firstOrNull { it.exists() }
-        ?: File(buildDir, "outputs/apk").walkTopDown().firstOrNull { it.extension == "apk" }
-    }
-
-    if (sourceApk != null && sourceApk.exists()) {
-      sourceApk.copyTo(destination, overwrite = true)
-      println("DEBUG APK READY AT ROOT: ${destination.absolutePath} (${destination.length()} bytes)")
-    } else {
-      throw GradleException("Could not find generated debug APK in $buildDir")
-    }
-  }
-}
-

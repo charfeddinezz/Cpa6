@@ -20,3 +20,13 @@ View your app in AI Studio: https://ai.studio/apps/315a6cf6-4931-4418-8fe1-569ac
 5. Remove this line from the app's `build.gradle.kts` file: `signingConfig = signingConfigs.getByName("debugConfig")`
 6. Run the app on an emulator or physical device
 7. If you have already published your app in AI Studio, please [request upload key reset](https://support.google.com/googleplay/android-developer/answer/9842756#zippy=%2Crequest-an-upload-key-reset) in Google Play Console.
+
+## Build a downloadable debug APK
+
+The project includes a Gradle task that builds the normal installable debug APK and copies it to the project root:
+
+```bash
+./gradlew copyDebugApkToProjectRoot
+```
+
+The resulting file is `app-debug.apk` in the project root. In Google AI Studio, use the file explorer's Download/Export action to download this file; no USB device, ADB, or external upload is required.
