@@ -201,11 +201,11 @@ fun CpaLockerDialog(
                             .background(CpaCardElevated)
                             .border(0.5.dp, CpaBorder, RoundedCornerShape(4.dp))
                             .clickable {
-                                lockerScriptInput = "<script type=\"text/javascript\" src=\"https://alignmentfiles.com/script_include.php?id=1783346\"></script>"
+                                lockerScriptInput = "<script type=\"text/javascript\" src=\"https://alignmentfiles.com/script_include.php?id=1741238\"></script>"
                             }
                             .padding(horizontal = 6.dp, vertical = 3.dp)
                     ) {
-                        Text("1783346 (افتراضي)", color = CpaPrimary, fontSize = 9.sp)
+                        Text("1741238 (افتراضي)", color = CpaPrimary, fontSize = 9.sp)
                     }
 
                     Box(

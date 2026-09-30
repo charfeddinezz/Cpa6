@@ -467,7 +467,7 @@ fun SettingsScreen(
                 OutlinedTextField(
                     value = cpaLockerDefaultId,
                     onValueChange = { cpaLockerDefaultId = it.trim() },
-                    placeholder = { Text("e.g. 1783346", color = CpaTextDim) },
+                    placeholder = { Text("e.g. 1741238", color = CpaTextDim) },
                     singleLine = true,
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedBorderColor = CpaPrimary,
@@ -570,7 +570,7 @@ fun SettingsScreen(
                         webrtcCustomIp = webrtcCustomIp.trim(),
                         forceProxyDns = forceProxyDns,
                         cpaLockerAutoTrigger = cpaLockerAutoTrigger,
-                        cpaLockerDefaultId = cpaLockerDefaultId.trim().ifBlank { "1783346" },
+                        cpaLockerDefaultId = cpaLockerDefaultId.trim().ifBlank { "1741238" },
                         cpaLockerAutoInjectIfMissing = cpaLockerAutoInjectIfMissing
                     )
                     onSaveSettings(updated)

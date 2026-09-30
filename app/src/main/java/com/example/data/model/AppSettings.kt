@@ -18,7 +18,7 @@ data class AppSettings(
     val forceProxyDns: Boolean = true, // Force DNS resolution through proxy & prevent DNS leaks
     val proxyEnabled: Boolean = true, // Master switch: when false, proxies are disabled & normal direct local connection is used
     val cpaLockerAutoTrigger: Boolean = true, // Auto-trigger call_locker() and polyfill document.write on locker detection
-    val cpaLockerDefaultId: String = "1783346", // Default Locker ID if custom or missing
+    val cpaLockerDefaultId: String = "1741238", // Default Locker ID if custom or missing (live-detected on gdfqo.blogspot.com)
     val cpaLockerAutoInjectIfMissing: Boolean = false, // Automatically inject locker script if not found on page
     val offerClickOpenInNewTab: Boolean = true, // When offer clicked in locker, automatically open in new tab and switch
     val offerClickStayDurationSec: Int = 15, // Stay duration on the new offer tab simulating real interaction

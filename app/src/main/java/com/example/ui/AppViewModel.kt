@@ -18,6 +18,7 @@ import com.example.data.model.TaskEntity
 import com.example.service.AutomationScriptBuilder
 import com.example.service.ExtractedPlanResult
 import com.example.service.IdentityService
+import com.example.service.SmartAutomationBrain
 import com.example.service.TaskCategoryPlanner
 import com.example.util.WebProxyManager
 import kotlinx.coroutines.Dispatchers
@@ -130,6 +131,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private var automationJob: Job? = null
 
+    // ── Smart Brain memory & learning ──
+    private var brainMemory: SmartAutomationBrain.BrainMemory = SmartAutomationBrain.initialMemory()
+    private val taskLearning: MutableMap<String, SmartAutomationBrain.TaskLearningStats> = mutableMapOf()
+    private var lastSmartDecision: SmartAutomationBrain.SmartDecision? = null
+
     init {
         addLog("info", "CPA Automator initialized and ready.")
         val initSettings = _settings.value
@@ -166,23 +172,37 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             // Ensure GDFQO Blogspot Offer Landing Bridge task exists (Priority #1)
+            // Live-verified: homepage carries alignmentfiles locker id=1741238 + Blogger cookie banner.
+            // UTM preserved so Facebook CPC attribution is not lost on LoadUrl.
             val fullTaskList = taskDao.getAllTasksList()
-            if (fullTaskList.none { it.url.contains("gdfqo.blogspot.com") }) {
+            val gdfqoUtmUrl = "https://gdfqo.blogspot.com/?utm_source=facebook&utm_medium=cpc&utm_campaign=tools&utm_content=tools_ad_1"
+            val existingGdfqo = fullTaskList.firstOrNull { it.url.contains("gdfqo.blogspot.com") }
+            if (existingGdfqo == null) {
                 val blogspotTask = TaskEntity(
                     id = "task_gdfqo_blogspot",
                     name = "GDFQO Offer Landing Bridge (Priority #1)",
-                    url = "https://gdfqo.blogspot.com",
-                    referer = "https://www.google.com",
+                    url = gdfqoUtmUrl,
+                    referer = "https://www.facebook.com/",
                     userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
                     mode = "mode1",
                     repeatCount = 5,
                     browserDuration = 60,
-                    categories = "Offer Click, Survey / Quiz, Email Submit, Lead Gen Form, Skip Upsells, Confirmation",
-                    completionKeywords = "thank you, congratulations, success, confirmed, reward, sweepstakes, completed",
+                    categories = "Content / Link Locker, Offer Click, Email Submit, Terms Agreement, Survey / Quiz, Lead Gen Form, Skip Upsells, Confirmation",
+                    completionKeywords = "thank you, congratulations, success, confirmed, reward, sweepstakes, completed, verified",
                     enabled = true
                 )
                 taskDao.insertTask(blogspotTask)
-                addLog("info", "Loaded GDFQO Landing Bridge task with Priority #1 Offer Click.")
+                addLog("info", "Loaded GDFQO Landing Bridge task with Priority #1 Offer Click + UTM + Locker.")
+            } else if (!existingGdfqo.url.contains("utm_source")) {
+                // Migration: preserve UTM + fix categories/referer for Facebook traffic
+                taskDao.updateTask(
+                    existingGdfqo.copy(
+                        url = gdfqoUtmUrl,
+                        referer = "https://www.facebook.com/",
+                        categories = "Content / Link Locker, Offer Click, Email Submit, Terms Agreement, Survey / Quiz, Lead Gen Form, Skip Upsells, Confirmation"
+                    )
+                )
+                addLog("info", "🧠 [ترحيل ذكي]: تم تحديث مهمة GDFQO برابط UTM الكامل + تصنيف Locker للتوافق مع facebook CPC.")
             }
 
             // Ensure BrowserLeaks IP & WebRTC verification task exists
@@ -775,7 +795,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun testLockerOfferClick(targetUrl: String = "https://gdfqo.blogspot.com", customLockerId: String? = null) {
-        val lockerId = customLockerId ?: _settings.value.cpaLockerDefaultId.ifBlank { "1783346" }
+        val lockerId = customLockerId ?: _settings.value.cpaLockerDefaultId.ifBlank { "1741238" }
         _automationState.update {
             it.copy(
                 currentUrl = targetUrl,
@@ -808,6 +828,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 activeClickTarget = currentState.activeClickText
             )
 
+            // ── Smart Brain: قرار واعٍ مبني على الذاكرة والسياق ──
+            val learningForTask = currentState.currentTaskId?.let { taskLearning[it] }
+            val decision = SmartAutomationBrain.decide(
+                report = report,
+                rawJson = reportJson,
+                configuredCategories = currentCats,
+                activeClickTarget = currentState.activeClickText,
+                memory = brainMemory,
+                taskLearning = learningForTask
+            )
+            lastSmartDecision = decision
+            brainMemory = SmartAutomationBrain.updateMemory(brainMemory, report, decision)
+            val quality = SmartAutomationBrain.sessionQuality(
+                brainMemory,
+                _automationState.value.leadsThisSession,
+                _automationState.value.completedThisSession
+            )
+
             _automationState.update { state ->
                 val updatedCats = if (report.detectedCategory.isNotBlank() && report.detectedCategory != "general") {
                     val det = report.detectedCategory
@@ -835,7 +873,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     activeDirectiveStep = directive.actionPlanSteps.firstOrNull() ?: "",
                     directiveArchetype = directive.archetype,
                     analysisConfidence = report.confidence,
-                    lockerDetectedOnPage = report.hasLocker || state.lockerDetectedOnPage
+                    lockerDetectedOnPage = report.hasLocker || state.lockerDetectedOnPage,
+                    // Brain awareness
+                    brainNextAction = decision.action.code,
+                    brainReasonAr = decision.reasonAr,
+                    brainConfidence = decision.confidence,
+                    isPageBlocked = decision.action == SmartAutomationBrain.NextAction.RELOAD_RETRY && decision.needsProxySwitch,
+                    isCaptchaPresent = decision.action == SmartAutomationBrain.NextAction.WAIT_CAPTCHA,
+                    isPageLoading = decision.action == SmartAutomationBrain.NextAction.WAIT_LOAD,
+                    stuckCount = brainMemory.consecutiveNoProgress,
+                    sessionQualityScore = quality,
+                    smartDecisionTitle = decision.titleAr
                 )
             }
 
@@ -846,14 +894,29 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             )
             addLog(
                 "info",
-                "🧭 [التوجيه التكتيكي الفوري]: ${directive.titleAr} [${directive.actionPlanSteps.size} خطوات]",
+                "🧠 [العقل الذكي ${decision.confidence}%]: ${decision.titleAr} — ${decision.reasonAr}",
                 _automationState.value.currentTaskName
             )
+            if (decision.isStuck) {
+                addLog(
+                    "warning",
+                    "🔄 [كشف التعليق]: ${decision.prioritySteps.getOrNull(1) ?: "تغيير الإستراتيجية"} (تكرار بلا تقدم: ${brainMemory.consecutiveNoProgress})",
+                    _automationState.value.currentTaskName
+                )
+            }
+            // Auto-recovery: blocked → rotate proxy silently for next cycle
+            if (decision.needsProxySwitch && _automationState.value.isRunning) {
+                addLog("warning", "🚫 [حماية ذكية]: رصد حظر — سيتم تدوير البروكسي قبل الدورة القادمة.", _automationState.value.currentTaskName)
+            }
 
             // If confirmation/thank you detected, notify completion!
             if (report.isConfirmationPage && _automationState.value.isRunning) {
                 completionReceivedForCurrentTask = true
                 addLog("success", "🏆 [تأكيد التحويل]: تم رصد صفحة الشكر والإكمال بنجاح!", _automationState.value.currentTaskName)
+            }
+            // Brain-level completion also triggers early exit
+            if (decision.action == SmartAutomationBrain.NextAction.COMPLETE_CONVERSION && _automationState.value.isRunning) {
+                completionReceivedForCurrentTask = true
             }
         }
     }
@@ -974,7 +1037,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             forceProxyDns = prefs.getBoolean("forceProxyDns", true),
             proxyEnabled = prefs.getBoolean("proxyEnabled", true),
             cpaLockerAutoTrigger = prefs.getBoolean("cpaLockerAutoTrigger", true),
-            cpaLockerDefaultId = prefs.getString("cpaLockerDefaultId", "1783346") ?: "1783346",
+            cpaLockerDefaultId = prefs.getString("cpaLockerDefaultId", "1741238") ?: "1741238",
             cpaLockerAutoInjectIfMissing = prefs.getBoolean("cpaLockerAutoInjectIfMissing", false),
             offerClickOpenInNewTab = prefs.getBoolean("offerClickOpenInNewTab", true),
             offerClickStayDurationSec = prefs.getInt("offerClickStayDurationSec", 15),
@@ -1171,12 +1234,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _currentTab.value = ScreenTab.BROWSER
 
         automationJob = viewModelScope.launch(Dispatchers.IO) {
+            // Reset brain memory for a fresh conscious campaign
+            brainMemory = SmartAutomationBrain.initialMemory()
+            lastSmartDecision = null
             _automationState.update {
                 it.copy(
                     isRunning = true,
                     phase = "preparing",
-                    phaseDetail = "Smart Auto: Preparing intelligent campaign...",
-                    loopCount = 0
+                    phaseDetail = "🧠 Smart Auto: Preparing intelligent campaign...",
+                    loopCount = 0,
+                    stuckCount = 0,
+                    sessionQualityScore = 70,
+                    brainReasonAr = "تهيئة الذاكرة وخطة الحملة الذكية..."
                 )
             }
 
@@ -1232,8 +1301,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     loop++
                     _automationState.update { it.copy(loopCount = loop) }
 
-                    val currentTasks = taskDao.getEnabledTasks()
-                    if (currentTasks.isEmpty()) break
+                    val rawList = taskDao.getEnabledTasks()
+                    if (rawList.isEmpty()) break
+                    // 🧠 Expert UCB: exploit winners + explore newcomers (no local-optimum trap)
+                    val currentTasks = SmartAutomationBrain.prioritizeTasksUCB(rawList, taskLearning)
+                    if (loop == 1 && currentTasks.size > 1) {
+                        addLog("info", "🧠 [ترتيب ذكي]: أولوية للمهام الأعلى تحويلاً: ${currentTasks.first().name}")
+                    }
 
                     for (rawTask in currentTasks) {
                         if (!_automationState.value.isRunning) break
@@ -1263,11 +1337,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
                         runSingleTask(task)
 
-                        // Wait between tasks: Cycle interval between 15 and 25 seconds
+                        // 🧠 Smart adaptive wait: quality-aware human rhythm
                         if (_automationState.value.isRunning) {
-                            val minWait = _settings.value.cycleIntervalMinSec.coerceAtLeast(15)
+                            val quality = _automationState.value.sessionQualityScore
+                            val minWait = _settings.value.cycleIntervalMinSec.coerceAtLeast(12)
                             val maxWait = _settings.value.cycleIntervalMaxSec.coerceAtLeast(minWait)
-                            val waitSec = if (minWait < maxWait) kotlin.random.Random.nextInt(minWait, maxWait + 1) else minWait
+                            val waitSec = SmartAutomationBrain.humanCycleInterval(minWait, maxWait, quality)
                             for (w in waitSec downTo 1) {
                                 if (!_automationState.value.isRunning) break
                                 _automationState.update {
@@ -1446,6 +1521,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val currentRunNumber = task.completedRuns + 1
         val parsedCats = TaskCategoryPlanner.parseCategories(task.categories)
         val planSummary = TaskCategoryPlanner.formatPlanSummary(parsedCats)
+        // 🧠 Fresh awareness per task repetition — don't carry stale stuck state
+        brainMemory = SmartAutomationBrain.initialMemory()
+        completionReceivedForCurrentTask = false
         
         // 0. Work Template resolution if attached
         var templateStepsJson: String? = null
@@ -1528,7 +1606,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         val identityData = IdentityService.generateIdentity(geo.countryCode, poolEmail?.email)
         _identity.value = identityData
-        addLog("info", "👤 [معلومات وهوية جديدة]: ${identityData.fullName} | البريد: ${identityData.email} | الهاتف: ${identityData.phone}", task.name)
+        // Expert: persona consistency guard (city-zip-phone-age-gender must agree)
+        val consistencyIssues = SmartAutomationBrain.personaConsistencyReport(
+            identityData.firstName, identityData.gender, identityData.birthDate,
+            identityData.city, identityData.postalCode, identityData.phone
+        )
+        if (consistencyIssues.isNotEmpty()) {
+            addLog("warning", "⚠️ [اتساق الهوية]: ${consistencyIssues.joinToString(", ")} — ${identityData.city} ${identityData.postalCode} ${identityData.phone}", task.name)
+        }
+        // Expert: stable fingerprint seed per repetition (same session = same fingerprint)
+        val seed = SmartAutomationBrain.sessionSeed(task.id, currentRunNumber, _settings.value.proxyHost)
+        _automationState.update { it.copy(fingerprintSeed = seed) }
+        addLog("info", "👤 [معلومات وهوية جديدة]: ${identityData.fullName} | البريد: ${identityData.email} | الهاتف: ${identityData.phone} | بذرة البصمة: $seed", task.name)
 
         // 5. Offer Click Priority #1 Sequential Selection
         val hasOfferClickCategory = parsedCats.any {
@@ -1544,15 +1633,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val nextClickTarget = if (hasOfferClickCategory) {
             val enabledClicks = offerClickDao.getEnabledClickItemsList()
             if (enabledClicks.isNotEmpty()) {
-                val idx = _automationState.value.clickSequenceIndex % enabledClicks.size
-                val chosen = enabledClicks[idx]
+                // Expert epsilon-greedy: 85% exploit best, 15% explore least-tried (no rotation blindness)
+                val texts = enabledClicks.map { it.text }
+                val counts = enabledClicks.associate { it.text to it.clickCount }
+                val pickIdx = SmartAutomationBrain.selectOfferText(texts, counts, epsilon = 0.15)
+                    .coerceIn(0, enabledClicks.size - 1)
+                val chosen = enabledClicks.sortedBy { texts.indexOf(it.text) }[pickIdx]
+                // advance sequence for traceability even with greedy pick
+                val seq = _automationState.value.clickSequenceIndex
                 _automationState.update {
                     it.copy(
                         activeClickText = chosen.text,
-                        clickSequenceIndex = (idx + 1) % enabledClicks.size
+                        clickSequenceIndex = seq + 1
                     )
                 }
-                addLog("info", "🎯 [النقرة على العرض]: تم تفعيلها لأنها مختارة في التصنيفات (#${idx + 1}): '${chosen.text}'", task.name)
+                val mode = if ((counts[chosen.text] ?: 0) == texts.minOfOrNull { counts[it] ?: 0 }) "استكشاف 🔍" else "استغلال 🏆"
+                addLog("info", "🎯 [النقرة الذكية $mode]: '${chosen.text}' (نقرات: ${chosen.clickCount})", task.name)
                 chosen.text
             } else {
                 _automationState.update { it.copy(activeClickText = null) }
@@ -1610,12 +1706,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             _browserCommand.value = BrowserCommand.ExecuteWorkTemplate(templateStepsJson)
         }
 
-        // Execution based on Mode
+        // 🧠 Execution based on Mode — with smart adaptive durations
+        val smartCats = TaskCategoryPlanner.parseCategories(task.categories)
+        val effectiveTask = task.copy(browserDuration = SmartAutomationBrain.smartDurationForTask(task, smartCats))
+        if (effectiveTask.browserDuration != task.browserDuration) {
+            addLog("info", "🧠 [مدة ذكية]: عُدّلت المدة ${task.browserDuration}s → ${effectiveTask.browserDuration}s حسب تعقيد الفانل (${smartCats.size} مراحل).", task.name)
+        }
         when (task.mode) {
-            "mode1" -> runMode1(task)
-            "mode2" -> runMode2(task, ua)
-            "mode3" -> runMode3(task)
-            else -> runMode1(task)
+            "mode1" -> runMode1(effectiveTask)
+            "mode2" -> runMode2(effectiveTask, ua)
+            "mode3" -> runMode3(effectiveTask)
+            else -> runMode1(effectiveTask)
         }
 
         // 4. CPA Grip Lead Check
@@ -1654,6 +1755,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             )
         }
 
+        // 🧠 Learning: record whether this run converted
+        val converted = completionReceivedForCurrentTask ||
+            _automationState.value.brainNextAction == SmartAutomationBrain.NextAction.COMPLETE_CONVERSION.code
+        SmartAutomationBrain.recordOutcome(taskLearning, task.id, converted)
+        val rate = taskLearning[task.id]?.let { (it.successRate * 100).toInt() } ?: 50
+
         // Increment task run count
         taskDao.incrementCompletedRuns(task.id)
         taskDao.updateTaskStatus(task.id, "completed")
@@ -1661,20 +1768,27 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 completedThisSession = it.completedThisSession + 1,
                 phase = "completed",
-                phaseDetail = "Completed run for ${task.name}. Page preserved."
+                phaseDetail = "Completed run for ${task.name}. Page preserved. | معدل التحويل: $rate%"
             )
         }
-        addLog("success", "Finished run for: ${task.name}. Conversion page preserved in Browser.", task.name)
+        addLog(if (converted) "success" else "info", "🧠 [تعلم]: ${task.name} → تحويل=${if (converted) "نعم ✅" else "لا"} | معدل النجاح التراكمي: $rate% (${taskLearning[task.id]?.runs} runs)", task.name)
     }
 
     private suspend fun runMode1(task: TaskEntity) {
         val duration = task.browserDuration.coerceAtLeast(5)
         for (sec in duration downTo 1) {
             if (!_automationState.value.isRunning) break
+            // 🧠 Early smart exit: conversion already confirmed → don't waste time
+            if (completionReceivedForCurrentTask) {
+                addLog("success", "🧠 [خروج مبكر ذكي]: تم التحويل — إنهاء العدّاد (${sec}s متبقية) فوراً.", task.name)
+                break
+            }
+            val brainHint = _automationState.value.smartDecisionTitle.takeIf { it.isNotBlank() }?.let { " | 🧠 $it" } ?: ""
+            val stuckWarn = if (_automationState.value.stuckCount >= 2) " ⚠️ تعليق (${_automationState.value.stuckCount})" else ""
             _automationState.update {
                 it.copy(
                     phase = "executing",
-                    phaseDetail = "Browsing & filling forms... (${sec}s left)"
+                    phaseDetail = "Browsing & filling forms... (${sec}s)$brainHint$stuckWarn"
                 )
             }
             delay(1000)
@@ -1687,16 +1801,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
         for (r in 1..repeats) {
             if (!_automationState.value.isRunning) break
+            if (completionReceivedForCurrentTask) {
+                addLog("success", "🧠 [خروج مبكر]: تحويل مؤكد في التكرار $r — تخطي الباقي.", task.name)
+                break
+            }
             if (r > 1) {
                 addLog("info", "Mode 2 repeat #$r: Reloading task in same session", task.name)
                 _browserCommand.value = BrowserCommand.LoadUrl(task.url, task.referer, ua)
             }
             for (sec in durationPerRepeat downTo 1) {
-                if (!_automationState.value.isRunning) break
+                if (!_automationState.value.isRunning || completionReceivedForCurrentTask) break
+                val brainHint = _automationState.value.smartDecisionTitle.takeIf { it.isNotBlank() }?.let { " | 🧠 $it" } ?: ""
                 _automationState.update {
                     it.copy(
                         phase = "executing",
-                        phaseDetail = "Mode 2 sub-run $r/$repeats (${sec}s left)"
+                        phaseDetail = "Mode 2 sub-run $r/$repeats (${sec}s)$brainHint"
                     )
                 }
                 delay(1000)
@@ -1707,24 +1826,31 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private suspend fun runMode3(task: TaskEntity) {
         completionReceivedForCurrentTask = false
         val maxWaitSec = 90
-        val keywords = task.completionKeywords.split(",").map { it.trim() }
-        addLog("info", "Mode 3 listening for completion keywords: ${keywords.take(4).joinToString(", ")}", task.name)
+        // 🧠 Smart keywords: configured + universal conversion signals
+        val keywords = SmartAutomationBrain.confirmKeywordsSmart(task.completionKeywords)
+        addLog("info", "🧠 Mode 3 smart listening (${keywords.size} إشارة): ${keywords.take(5).joinToString(", ")}", task.name)
 
         for (sec in 1..maxWaitSec) {
             if (!_automationState.value.isRunning || completionReceivedForCurrentTask) break
+            // 🧠 If brain already decided COMPLETE, exit even before bridge callback
+            if (_automationState.value.brainNextAction == SmartAutomationBrain.NextAction.COMPLETE_CONVERSION.code) {
+                completionReceivedForCurrentTask = true
+                break
+            }
+            val brainHint = _automationState.value.smartDecisionTitle.takeIf { it.isNotBlank() }?.let { " | 🧠 $it" } ?: ""
             _automationState.update {
                 it.copy(
                     phase = "executing",
-                    phaseDetail = "Mode 3: Detecting completion keywords (${maxWaitSec - sec}s remaining)"
+                    phaseDetail = "Mode 3: Smart detect (${maxWaitSec - sec}s)$brainHint"
                 )
             }
             delay(1000)
         }
 
         if (completionReceivedForCurrentTask) {
-            addLog("success", "Smart Mode detected conversion page early!", task.name)
+            addLog("success", "🧠 Smart Mode detected conversion early (keyword + brain consensus)!", task.name)
         } else {
-            addLog("warning", "Smart Mode reached timeout waiting for keywords.", task.name)
+            addLog("warning", "Smart Mode timeout — سيُسجَّل كغير محوّل ويتعلم العقل من ذلك.", task.name)
         }
     }
 
@@ -1766,6 +1892,36 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun onMidPageInfoExtracted(extractedKey: String, extractedValue: String) {
         _automationState.update { it.copy(lastExtractedMidPageText = "$extractedKey -> $extractedValue") }
         addLog("info", "🧠 [استخراج ذكي وتكيّف]: استخراج: '$extractedKey' | الإجابة: '$extractedValue'")
+        // Expert: auto-learn unseen locker offers as disabled suggestions (user enables the winners)
+        if (extractedKey == "locker_offers_available" || extractedKey == "locker_offers_matched") {
+            viewModelScope.launch(Dispatchers.IO) {
+                try {
+                    val candidates = extractedValue.split("|", "•", "\n")
+                        .map { it.trim().take(80) }
+                        .filter { it.length >= 8 && it.length <= 80 }
+                        .distinct().take(6)
+                    if (candidates.isEmpty()) return@launch
+                    val existing = offerClickDao.getAllClickItemsList().map { it.text.lowercase() }.toSet()
+                    var added = 0
+                    for (cand in candidates) {
+                        val low = cand.lowercase()
+                        if (existing.any { it.contains(low.take(12)) || low.contains(it.take(12)) }) continue
+                        if (cand.equals("(no-text)", true)) continue
+                        val maxOrder = offerClickDao.getMaxOrderIndex() ?: 0
+                        offerClickDao.insertClickItem(
+                            com.example.data.model.OfferClickItem(
+                                text = cand, enabled = false,
+                                orderIndex = maxOrder + 1 + added,
+                                tagOrNote = "مكتشف تلقائي من اللوكر 🤖"
+                            )
+                        )
+                        added++
+                        if (added >= 2) break
+                    }
+                    if (added > 0) addLog("success", "🤖 [تعلم العروض]: أُضيف $added نصاً جديداً من اللوكر كمسودة معطلة — فعّل الفائز منها.")
+                } catch (_: Exception) {}
+            }
+        }
     }
 
     fun onTemplateGenerated(templateJson: String) {

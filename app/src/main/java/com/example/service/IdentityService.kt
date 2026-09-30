@@ -138,6 +138,30 @@ object IdentityService {
         "gmail.com", "yahoo.com", "outlook.com", "hotmail.com", "icloud.com", "proton.me"
     )
 
+    // Expert: city-consistent area codes (prevents phone-geo mismatch signals)
+    private val CITY_AREA_CODES = mapOf(
+        "New York" to listOf(212, 646, 718, 917),
+        "Los Angeles" to listOf(213, 310, 323, 818),
+        "Chicago" to listOf(312, 773, 872),
+        "Houston" to listOf(281, 346, 713, 832),
+        "Phoenix" to listOf(480, 602, 623),
+        "Philadelphia" to listOf(215, 267),
+        "San Antonio" to listOf(210, 726),
+        "San Diego" to listOf(619, 858),
+        "Dallas" to listOf(214, 469, 972),
+        "Austin" to listOf(512, 737),
+        "Jacksonville" to listOf(904),
+        "Fort Worth" to listOf(682, 817),
+        "Columbus" to listOf(614, 380),
+        "Charlotte" to listOf(704, 980),
+        "Indianapolis" to listOf(317, 463),
+        "Seattle" to listOf(206),
+        "Denver" to listOf(303, 720),
+        "Washington" to listOf(202),
+        "Boston" to listOf(617, 857),
+        "Nashville" to listOf(615, 629)
+    )
+
     private val rnd = Random()
 
     fun generateUTM(baseUrl: String): String {
@@ -183,8 +207,8 @@ object IdentityService {
         val state = cityData.second
         val postalCode = cityData.third
 
-        // Phone: +1 (Area) XXX-XXXX
-        val areaCode = rnd.nextInt(800) + 200
+        // Phone: area code CONSISTENT with city (expert fix: random area exposed geo-mismatch)
+        val areaCode = CITY_AREA_CODES[city]?.randomOrNull() ?: (rnd.nextInt(800) + 200)
         val phoneMid = rnd.nextInt(900) + 100
         val phoneEnd = rnd.nextInt(9000) + 1000
         val phone = "+1 ($areaCode) $phoneMid-$phoneEnd"

@@ -328,7 +328,8 @@ fun BrowserScreen(
     }
 
     // Re-inject WebRTC protection dynamically ONLY into the ACTIVE displayed tab
-    LaunchedEffect(activeTabId, activeTab.webView, effectiveWebRtcIp, settings.webrtcMode, extractedInfo.timezone, extractedInfo.language) {
+    // Expert: stable fingerprintSeed per repetition — same session same fingerprint
+    LaunchedEffect(activeTabId, activeTab.webView, effectiveWebRtcIp, settings.webrtcMode, extractedInfo.timezone, extractedInfo.language, automationState.fingerprintSeed) {
         activeTab.webView?.evaluateJavascript(
             AutomationScriptBuilder.buildAntiDetectionScript(
                 proxyIp = effectiveWebRtcIp,
@@ -336,7 +337,8 @@ fun BrowserScreen(
                 timezone = extractedInfo.timezone,
                 language = extractedInfo.language,
                 latitude = extractedInfo.latitude,
-                longitude = extractedInfo.longitude
+                longitude = extractedInfo.longitude,
+                fingerprintSeed = automationState.fingerprintSeed
             ),
             null
         )
@@ -409,7 +411,7 @@ fun BrowserScreen(
                     // 2. Landing Page: Maintain loop, check for locker and auto-click matching offer (without touching the background site)
                     activeDisplayed.webView?.evaluateJavascript(
                         AutomationScriptBuilder.buildCpaLockerDetectorAndActivatorScript(
-                            customId = settings.cpaLockerDefaultId.ifBlank { "1783346" },
+                            customId = settings.cpaLockerDefaultId.ifBlank { "1741238" },
                             forceTrigger = settings.cpaLockerAutoTrigger,
                             forceInjectIfMissing = settings.cpaLockerAutoInjectIfMissing
                         ),
@@ -913,7 +915,7 @@ fun BrowserScreen(
                     .clickable {
                         activeTab.webView?.evaluateJavascript(
                             AutomationScriptBuilder.buildCpaLockerDetectorAndActivatorScript(
-                                customId = settings.cpaLockerDefaultId.ifBlank { "1783346" },
+                                customId = settings.cpaLockerDefaultId.ifBlank { "1741238" },
                                 forceTrigger = true,
                                 forceInjectIfMissing = true
                             ),
@@ -1429,7 +1431,8 @@ fun BrowserScreen(
                                                 language = extractedInfo.language,
                                                 latitude = extractedInfo.latitude,
                                                 longitude = extractedInfo.longitude,
-                                                userAgent = this.settings.userAgentString
+                                                userAgent = this.settings.userAgentString,
+                                                fingerprintSeed = automationState.fingerprintSeed
                                             ),
                                             setOf("*")
                                         )
@@ -1595,7 +1598,8 @@ fun BrowserScreen(
                                                 language = extractedInfo.language,
                                                 latitude = extractedInfo.latitude,
                                                 longitude = extractedInfo.longitude,
-                                                userAgent = viewUa
+                                                userAgent = viewUa,
+                                                fingerprintSeed = automationState.fingerprintSeed
                                             ),
                                             null
                                         )
@@ -1627,7 +1631,8 @@ fun BrowserScreen(
                                                 language = extractedInfo.language,
                                                 latitude = extractedInfo.latitude,
                                                 longitude = extractedInfo.longitude,
-                                                userAgent = finishUa
+                                                userAgent = finishUa,
+                                                fingerprintSeed = automationState.fingerprintSeed
                                             ),
                                             null
                                         )
@@ -1671,7 +1676,7 @@ fun BrowserScreen(
                                                 // Only activate the content locker and click the offer so it opens in a new tab:
                                                 view?.evaluateJavascript(
                                                     AutomationScriptBuilder.buildCpaLockerDetectorAndActivatorScript(
-                                                        customId = settings.cpaLockerDefaultId.ifBlank { "1783346" },
+                                                        customId = settings.cpaLockerDefaultId.ifBlank { "1741238" },
                                                         forceTrigger = settings.cpaLockerAutoTrigger,
                                                         forceInjectIfMissing = settings.cpaLockerAutoInjectIfMissing
                                                     ),

@@ -14,7 +14,8 @@ object AutomationScriptBuilder {
         language: String = "en-US",
         latitude: Double = 40.7128,
         longitude: Double = -74.0060,
-        userAgent: String = ""
+        userAgent: String = "",
+        fingerprintSeed: Long = 0L // Expert: stable per-session seed; 0 = legacy random
     ): String {
         val cleanIp = proxyIp.trim().ifBlank { "104.28.19.42" }
         val cleanTz = timezone.trim().ifBlank { "America/New_York" }
@@ -52,8 +53,14 @@ object AutomationScriptBuilder {
             else -> "Windows"
         }
 
+        // Seeded PRNG so the SAME session keeps the SAME fingerprint (mid-session drift = bot signal)
+        val seedInit = if (fingerprintSeed == 0L) "Math.floor(Math.random()*1e9)" else "${fingerprintSeed}>>>0"
+
         return """
 (function() {
+  var __cpaSeed = $seedInit;
+  function __cpaRnd() { __cpaSeed = ((__cpaSeed * 1664525 + 1013904223) >>> 0); return __cpaSeed / 4294967296; }
+  function __cpaPick(arr) { return arr[Math.floor(__cpaRnd() * arr.length)]; }
   // 1. WebGL Vendor & Renderer spoofing (Synchronized with User-Agent & Platform)
   try {
     var getParameter = WebGLRenderingContext.prototype.getParameter;
@@ -1475,11 +1482,45 @@ true;
     return checkedCount;
   }
 
+  function isHoneypot(el) {
+    try {
+      if (!el) return true;
+      var t = (el.type || '').toLowerCase();
+      if (t === 'hidden') return true;
+      var style = window.getComputedStyle(el);
+      if (style && (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0)) return true;
+      var r = el.getBoundingClientRect();
+      if ((r.width === 0 && r.height === 0) || r.left < -2000 || r.top < -2000) return true;
+      var nm = ((el.name || '') + ' ' + (el.id || '') + ' ' + (el.className || '')).toLowerCase();
+      if (nm.match(/honeypot|honey|trap|bot-field|spam|do-not-fill|hidden-field/)) return true;
+      if (el.hasAttribute && el.hasAttribute('tabindex') && el.getAttribute('tabindex') === '-1' && (el.value || '') === '') {
+        if (nm.match(/website|url|company|fax|middle/)) return true;
+      }
+    } catch(e) {}
+    return false;
+  }
+
   function fillInputFields() {
     var ident = window._cpaIdentity;
     if (!ident) return 0;
 
     var inputs = Array.from(document.querySelectorAll('input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=checkbox]):not([type=radio]), select, textarea'));
+    // Expert: human tab-order — top-to-bottom, skip honeypots (bot traps)
+    inputs = inputs.filter(function(el) { return !isHoneypot(el); });
+    inputs.sort(function(a, b) {
+      try {
+        var ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+        if (Math.abs(ra.top - rb.top) > 20) return ra.top - rb.top;
+        return ra.left - rb.left;
+      } catch(e) { return 0; }
+    });
+    // Persona facts memory: consistent age/gender across multi-page funnels
+    window._cpaPersonaFacts = window._cpaPersonaFacts || {};
+    if (ident.birthDate) {
+      var __y = parseInt((ident.birthDate || '1995').substring(0, 4)) || 1995;
+      window._cpaPersonaFacts.age = 2026 - __y;
+      window._cpaPersonaFacts.gender = (ident.gender || '').toLowerCase();
+    }
     var filled = 0;
 
     var phoneDigits = (ident.phone || '2125550199').replace(/\D/g, '');
@@ -2039,6 +2080,123 @@ true;
         """.trimIndent()
     }
 
+    /**
+     * Smart human simulation: natural reading scroll + mouse wander + hover awareness.
+     * Does NOT click — pure awareness/exploration so bot-detectors see human rhythm.
+     */
+    fun buildAwareHumanSimulationScript(): String {
+        return """
+(function() {
+  try {
+    if (window.__cpa_aware_sim_running) return 'already';
+    window.__cpa_aware_sim_running = true;
+    var steps = 2 + Math.floor(Math.random() * 3);
+    var i = 0;
+    // 1. Mouse wander: 3-5 natural moves
+    var mouseMoves = 0;
+    var mouseTimer = setInterval(function() {
+      try {
+        var x = Math.floor(Math.random() * (window.innerWidth - 100)) + 50;
+        var y = Math.floor(Math.random() * (window.innerHeight - 100)) + 50;
+        ['mousemove','mouseover'].forEach(function(t) {
+          document.dispatchEvent(new MouseEvent(t, { clientX: x, clientY: y, bubbles: true, view: window }));
+        });
+      } catch(e) {}
+      if (++mouseMoves >= 4) clearInterval(mouseTimer);
+    }, 700 + Math.floor(Math.random() * 600));
+    // 2. Reading scroll: gradual down with pauses, occasional look-back
+    function doScroll() {
+      if (i >= steps) { window.__cpa_aware_sim_running = false; return; }
+      var amt = 120 + Math.floor(Math.random() * 220);
+      try { window.scrollBy({ top: amt, behavior: 'smooth' }); } catch(e) { window.scrollBy(0, amt); }
+      i++;
+      var pause = 900 + Math.floor(Math.random() * 1600);
+      setTimeout(function() {
+        if (Math.random() < 0.25) { try { window.scrollBy({ top: -60, behavior: 'smooth' }); } catch(e){} }
+        setTimeout(doScroll, 500);
+      }, pause);
+    }
+    setTimeout(doScroll, 600);
+    // 3. Hover primary CTA without clicking (awareness signal)
+    setTimeout(function() {
+      try {
+        var cta = document.querySelector('button:not([disabled]), a.btn, [class*="cta"]');
+        if (cta && cta.offsetParent !== null) {
+          var r = cta.getBoundingClientRect();
+          cta.dispatchEvent(new MouseEvent('mouseover', { clientX: r.left + r.width/2, clientY: r.top + 10, bubbles: true }));
+        }
+      } catch(e) {}
+    }, 1500);
+    return 'started';
+  } catch(e) { return 'err:' + e.message; }
+})();
+true;
+        """.trimIndent()
+    }
+
+    /**
+     * Human typing: types value char-by-char with random 30-90ms delays,
+     * firing proper input events so React/Angular trackers accept it.
+     * @param selector CSS selector of the field, @param value text to type
+     */
+    fun buildHumanTypingScript(selector: String, value: String): String {
+        val safeSel = selector.replace("'", "\\'").replace("\n", "")
+        val safeVal = org.json.JSONObject.quote(value)
+        return """
+(function() {
+  try {
+    var el = document.querySelector('$safeSel');
+    if (!el) return 'not_found';
+    var text = $safeVal;
+    el.focus();
+    el.value = '';
+    el.dispatchEvent(new Event('focus', { bubbles: true }));
+    var idx = 0;
+    // Occasional typo + correction for ultra-human signal (5% chance)
+    var makeTypo = Math.random() < 0.05 && text.length > 6;
+    var typoAt = makeTypo ? (2 + Math.floor(Math.random() * (text.length - 4))) : -1;
+    function typeNext() {
+      if (idx >= text.length) {
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+        return 'done';
+      }
+      var ch = text[idx];
+      if (idx === typoAt) {
+        // type wrong char then backspace
+        var wrong = (ch === 'a') ? 's' : 'a';
+        el.value += wrong;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        setTimeout(function() {
+          el.value = el.value.slice(0, -1);
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.value += ch;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          idx++;
+          setTimeout(typeNext, 60 + Math.floor(Math.random() * 70));
+        }, 120 + Math.floor(Math.random() * 150));
+        return;
+      }
+      // Native setter for framework compat
+      try {
+        var proto = el.tagName === 'SELECT' ? window.HTMLSelectElement.prototype : window.HTMLInputElement.prototype;
+        var setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        var cur = el.value + ch;
+        if (setter) setter.call(el, cur); else el.value = cur;
+      } catch(e) { el.value += ch; }
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      idx++;
+      setTimeout(typeNext, 30 + Math.floor(Math.random() * 60));
+    }
+    typeNext();
+    return 'typing';
+  } catch(e) { return 'err:' + e.message; }
+})();
+true;
+        """.trimIndent()
+    }
+
     fun buildCompletionDetectorScript(keywords: List<String>): String {
         val kwArray = keywords.joinToString(",") { "'${it.trim().lowercase().replace("'", "\\'")}'" }
         return """
@@ -2206,14 +2364,21 @@ true;
       }
     }
 
-    // 4. Scan for Confirmation / Thank-You Indicators
+    // 4. Scan for Confirmation / Thank-You Indicators (expanded smart list)
     var isConfirmation = false;
-    var confirmKeywords = ['thank you', 'congratulations', 'order received', 'claim confirmed', 'reward credited', 'entry received', 'survey completed', 'successfully registered'];
+    var matchedConfirm = '';
+    var confirmKeywords = ['thank you', 'thanks', 'congratulations', 'congrats', 'order received', 'claim confirmed', 'reward credited', 'entry received', 'entry confirmed', 'survey completed', 'successfully registered', 'success', 'verified', 'welcome', 'account created', 'ticket number', 'responses recorded', 'claim reward', 'reward claimed'];
     for (var kw = 0; kw < confirmKeywords.length; kw++) {
       if (bodyText.indexOf(confirmKeywords[kw]) !== -1 || title.toLowerCase().indexOf(confirmKeywords[kw]) !== -1) {
         isConfirmation = true;
+        matchedConfirm = confirmKeywords[kw];
         break;
       }
+    }
+    // URL-based confirmation signals (thank-you / success / complete pages)
+    if (!isConfirmation) {
+      var urlLow = url.toLowerCase();
+      if (urlLow.match(/(thank|success|complete|confirm|congrat|welcome|done|finish)/)) { isConfirmation = true; matchedConfirm = 'url-signal'; }
     }
 
     // 5. Scan for CPA Content Lockers
@@ -2224,6 +2389,26 @@ true;
     if (lockerScripts.length > 0 || lockerIframes.length > 0 || lockerContainers.length > 0 || bodyText.includes('complete an offer below') || bodyText.includes('locked content') || bodyText.includes('complete a survey below') || url.includes('alignmentfiles') || url.includes('cpagrip')) {
       hasLocker = true;
     }
+
+    // 5b. SMART: Captcha / Block / Loading awareness (incl. Shadow DOM + iframes)
+    var hasCaptcha = false; var captchaKeyword = '';
+    var isBlocked = false; var blockKeyword = '';
+    var isLoadingPage = false; var loadingKeyword = '';
+    try {
+      var captchaEls = document.querySelectorAll('iframe[src*="recaptcha"], iframe[src*="hcaptcha"], iframe[src*="captcha"], iframe[src*="turnstile"], div[class*="g-recaptcha"], div[class*="h-captcha"], div[id*="captcha"], [data-sitekey]');
+      if (captchaEls.length > 0) { hasCaptcha = true; captchaKeyword = 'captcha-element'; }
+      var captchaPats = ['captcha', 'recaptcha', 'hcaptcha', 'turnstile', "i'm not a robot", 'select all images', 'verify you are human'];
+      for (var ci = 0; ci < captchaPats.length; ci++) { if (bodyText.indexOf(captchaPats[ci]) !== -1) { hasCaptcha = true; captchaKeyword = captchaPats[ci]; break; } }
+      var blockPats = ['access denied', 'forbidden', 'your ip has been blocked', 'suspicious activity', 'unusual traffic', 'attention required', 'error 1020', 'ip banned', 'blocked'];
+      for (var bi = 0; bi < blockPats.length; bi++) { if (bodyText.indexOf(blockPats[bi]) !== -1 || title.toLowerCase().indexOf(blockPats[bi]) !== -1) { isBlocked = true; blockKeyword = blockPats[bi]; break; } }
+      var loadPats = ['just a moment', 'verifying your browser', 'checking your browser', 'please wait', 'redirecting', 'loading'];
+      for (var li = 0; li < loadPats.length; li++) { if (bodyText.indexOf(loadPats[li]) !== -1 && bodyText.length < 800) { isLoadingPage = true; loadingKeyword = loadPats[li]; break; } }
+      // Shadow DOM host count — pages hiding forms inside shadow roots
+      var shadowHosts = 0;
+      try { var allEls = document.querySelectorAll('*'); for (var si = 0; si < Math.min(allEls.length, 400); si++) { if (allEls[si].shadowRoot) shadowHosts++; } } catch(se) {}
+      var iframeCount = document.querySelectorAll('iframe').length;
+      var visibleBtnCount = buttons.filter(function(b){ try { return b.offsetParent !== null; } catch(e){ return true; } }).length;
+    } catch(smartErr) { var shadowHosts = 0; var iframeCount = 0; var visibleBtnCount = buttons.length; }
 
     // 6. Intelligent Category & Stage Classification
     var category = 'general';
@@ -2278,6 +2463,15 @@ true;
       nextAction = 'Auto-detect active controls and advance';
     }
 
+    // 6b. SMART confidence adjustment: penalize weak/ambiguous signals, boost strong ones
+    try {
+      if (typeof shadowHosts !== 'undefined' && shadowHosts > 0 && confidence > 55) confidence -= 10;
+      if (typeof iframeCount !== 'undefined' && iframeCount >= 4 && category !== 'content_locker') confidence -= 5;
+      if (allInputs.length === 0 && buttons.length === 0) confidence = Math.min(confidence, 45);
+      if (hasCaptcha || isBlocked) confidence = Math.max(confidence, 88);
+      if (isConfirmation && matchedConfirm) confidence = Math.min(99, confidence + 3);
+    } catch(adjErr) {}
+
     var report = {
       url: url,
       title: title,
@@ -2296,7 +2490,17 @@ true;
       hasLocker: hasLocker,
       hasOfferClickCandidate: hasOfferCandidate,
       isConfirmationPage: isConfirmation,
-      recommendedNextAction: nextAction
+      recommendedNextAction: nextAction,
+      hasCaptcha: (typeof hasCaptcha !== 'undefined') ? hasCaptcha : false,
+      captchaKeyword: (typeof captchaKeyword !== 'undefined') ? captchaKeyword : '',
+      isBlocked: (typeof isBlocked !== 'undefined') ? isBlocked : false,
+      blockKeyword: (typeof blockKeyword !== 'undefined') ? blockKeyword : '',
+      isLoading: (typeof isLoadingPage !== 'undefined') ? isLoadingPage : false,
+      loadingKeyword: (typeof loadingKeyword !== 'undefined') ? loadingKeyword : '',
+      confirmKeyword: (typeof matchedConfirm !== 'undefined') ? matchedConfirm : '',
+      shadowHosts: (typeof shadowHosts !== 'undefined') ? shadowHosts : 0,
+      iframeCount: (typeof iframeCount !== 'undefined') ? iframeCount : 0,
+      visibleButtons: (typeof visibleBtnCount !== 'undefined') ? visibleBtnCount : buttons.length
     };
 
     var reportStr = JSON.stringify(report);
@@ -2604,7 +2808,7 @@ true;
 
         val idRegex = Regex("""id=([0-9a-zA-Z_-]+)""", RegexOption.IGNORE_CASE)
         val idFromUrl = if (extractedUrl.isNotBlank()) idRegex.find(extractedUrl)?.groupValues?.get(1) else null
-        val finalId = idFromUrl ?: if (clean.isNotBlank() && clean.all { it.isDigit() || it == '-' || it == '_' }) clean else "1783346"
+        val finalId = idFromUrl ?: if (clean.isNotBlank() && clean.all { it.isDigit() || it == '-' || it == '_' }) clean else "1741238"
 
         val finalUrl = if (extractedUrl.isNotBlank()) extractedUrl else "https://alignmentfiles.com/script_include.php?id=$finalId"
         return Pair(finalUrl, finalId)
@@ -2629,7 +2833,7 @@ true;
         forceInjectIfMissing: Boolean = false
     ): String {
         val safeCustomUrl = (customUrl ?: "").trim().replace("'", "\\'")
-        val safeCustomId = (customId ?: "1783346").trim().replace("'", "\\'")
+        val safeCustomId = (customId ?: "1741238").trim().replace("'", "\\'")
 
         return """
 (function() {
@@ -2660,14 +2864,14 @@ true;
 
     // Report detection to Android
     if (detectedUrl && window.AndroidBridge && typeof window.AndroidBridge.onLockerDetected === 'function') {
-      window.AndroidBridge.onLockerDetected(detectedUrl, detectedId || '1783346', false);
+      window.AndroidBridge.onLockerDetected(detectedUrl, detectedId || '1741238', false);
     }
 
     var targetUrl = detectedUrl;
     var targetId = detectedId;
 
     if (!targetUrl && $forceInjectIfMissing) {
-      targetId = '$safeCustomId'.trim() || '1783346';
+      targetId = '$safeCustomId'.trim() || '1741238';
       targetUrl = '$safeCustomUrl'.trim() || ('https://alignmentfiles.com/script_include.php?id=' + targetId);
     }
 
@@ -2756,7 +2960,7 @@ true;
 
         if (window.AndroidBridge && (detectedUrl || targetUrl || lockerEl)) {
           if (typeof window.AndroidBridge.onLockerDetected === 'function') {
-            window.AndroidBridge.onLockerDetected(detectedUrl || targetUrl || 'detected_locker', detectedId || targetId || '1783346', triggered);
+            window.AndroidBridge.onLockerDetected(detectedUrl || targetUrl || 'detected_locker', detectedId || targetId || '1741238', triggered);
           }
           if (typeof window.AndroidBridge.onLockerStatus === 'function') {
             window.AndroidBridge.onLockerStatus(triggered ? 'تم تشغيل وتفعيل اللوكر بنجاح!' : 'تم فك حظر سكريبت اللوكر وتجهيزه');
@@ -2960,6 +3164,18 @@ true;
       return true;
     }
 
+    function reportOffersForLearning(cands, matched) {
+      try {
+        var names = cands.slice(0, 8).map(function(o) { return (o.text || '(no-text)').slice(0, 40); }).join(' | ');
+        if (window.AndroidBridge && typeof window.AndroidBridge.onMidPageInfoExtracted === 'function') {
+          window.AndroidBridge.onMidPageInfoExtracted(matched ? 'locker_offers_matched' : 'locker_offers_available', names);
+        }
+        if (window.AndroidBridge && typeof window.AndroidBridge.onLockerStatus === 'function' && !matched) {
+          window.AndroidBridge.onLockerStatus('لا تطابق حرفي — المتاح: ' + names.slice(0, 90) + ' — سيتم أول عرض كبديل ذكي');
+        }
+      } catch(e) {}
+    }
+
     function scanAndExecuteOfferSelection() {
       if (window.__cpa_locker_offer_clicked) return true;
       var candidates = collectAllCandidates();
@@ -2967,18 +3183,21 @@ true;
 
       // Select offer based on strategy and user text targets
       var chosen = null;
+      var priorityMatched = false;
       if (strategy === 'priority') {
         for (var c = 0; c < candidates.length; c++) {
           var candText = candidates[c].text.toLowerCase();
           for (var p = 0; p < targetList.length; p++) {
             if (candText.includes(targetList[p])) {
               chosen = candidates[c];
+              priorityMatched = true;
               break;
             }
           }
           if (chosen) break;
         }
-        if (!chosen) chosen = candidates[0];
+        if (!chosen) { chosen = candidates[0]; reportOffersForLearning(candidates, false); }
+        else { reportOffersForLearning(candidates, true); }
       } else if (strategy === 'random') {
         var randIdx = Math.floor(Math.random() * candidates.length);
         chosen = candidates[randIdx];

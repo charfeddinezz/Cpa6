@@ -121,5 +121,16 @@ data class AutomationState(
     val directiveArchetype: String = "",
     val analysisConfidence: Int = 0,
     val cycleCountdown: Int = 0,
-    val cycleTotalDuration: Int = 20
+    val cycleTotalDuration: Int = 20,
+    // ── Smart Brain awareness fields ──
+    val brainNextAction: String = "",
+    val brainReasonAr: String = "",
+    val brainConfidence: Int = 0,
+    val isPageBlocked: Boolean = false,
+    val isCaptchaPresent: Boolean = false,
+    val isPageLoading: Boolean = false,
+    val stuckCount: Int = 0,
+    val sessionQualityScore: Int = 70,
+    val smartDecisionTitle: String = "",
+    val fingerprintSeed: Long = 0L
 )
