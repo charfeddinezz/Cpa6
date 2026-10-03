@@ -16,7 +16,7 @@ data class AppSettings(
     val webrtcMode: String = "spoof", // spoof, disabled, real
     val webrtcCustomIp: String = "",
     val forceProxyDns: Boolean = true, // Force DNS resolution through proxy & prevent DNS leaks
-    val proxyEnabled: Boolean = true, // Master switch: when false, proxies are disabled & normal direct local connection is used
+    val proxyEnabled: Boolean = false, // Master switch: when false, proxies are disabled & normal direct local connection is used (DEFAULT OFF for direct success)
     val cpaLockerAutoTrigger: Boolean = true, // Auto-trigger call_locker() and polyfill document.write on locker detection
     val cpaLockerDefaultId: String = "1741238", // Default Locker ID if custom or missing (live-detected on gdfqo.blogspot.com)
     val cpaLockerAutoInjectIfMissing: Boolean = false, // Automatically inject locker script if not found on page

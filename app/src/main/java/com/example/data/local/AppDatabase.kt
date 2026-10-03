@@ -26,7 +26,7 @@ import java.util.UUID
         OfferClickItem::class,
         com.example.data.model.WorkTemplateEntity::class
     ],
-    version = 6,
+    version = 7,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
@@ -305,33 +305,39 @@ true;
             // Seed initial Offer Click texts (with user's exact requested text at orderIndex 0)
             val initialClickTexts = listOf(
                 OfferClickItem(
-                    text = "Get \$1000 Walmart gift card",
+                    text = "Get a \$100 Nike Gift Card!",
                     enabled = true,
                     orderIndex = 0,
+                    tagOrNote = "Nike $100 Direct (GDFQO Locker Priority)"
+                ),
+                OfferClickItem(
+                    text = "Get \$1000 Walmart gift card",
+                    enabled = true,
+                    orderIndex = 1,
                     tagOrNote = "Walmart $1000 GC Offer"
                 ),
                 OfferClickItem(
                     text = "Claim \$750 Cash App Reward",
                     enabled = true,
-                    orderIndex = 1,
+                    orderIndex = 2,
                     tagOrNote = "Cash App Reward"
                 ),
                 OfferClickItem(
                     text = "Get \$500 Amazon Gift Card",
                     enabled = true,
-                    orderIndex = 2,
+                    orderIndex = 3,
                     tagOrNote = "Amazon $500 Sweep"
                 ),
                 OfferClickItem(
                     text = "Win \$100 Target Gift Card",
                     enabled = true,
-                    orderIndex = 3,
+                    orderIndex = 4,
                     tagOrNote = "Target Gift Card"
                 ),
                 OfferClickItem(
                     text = "Claim \$500 Apple Store Card",
                     enabled = false, // Demonstrates toggled/closed text as requested
-                    orderIndex = 4,
+                    orderIndex = 5,
                     tagOrNote = "Apple Store Voucher"
                 )
             )

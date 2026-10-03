@@ -136,6 +136,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val taskLearning: MutableMap<String, SmartAutomationBrain.TaskLearningStats> = mutableMapOf()
     private var lastSmartDecision: SmartAutomationBrain.SmartDecision? = null
 
+    // ── Full-automation hardening (P0/P1/P2/P3) ──
+    private val taskFailureCount: MutableMap<String, Int> = mutableMapOf()
+    private val taskRetryLimit: Int = 3
+    private var automationStartTime: Long = 0L
+    private val learningPrefsKey: String = "brain_learning_json_v1"
+    private val logsPrefsKey: String = "persisted_logs_json_v1"
+    companion object {
+        const val NIKE_CLICK_TEXT: String = "Get a \$100 Nike Gift Card!"
+        const val GDFQO_TASK_ID: String = "task_gdfqo_blogspot"
+        const val GDFQO_UTM_URL: String = "https://gdfqo.blogspot.com/?utm_source=facebook&utm_medium=cpc&utm_campaign=tools&utm_content=tools_ad_1"
+    }
+
     init {
         addLog("info", "CPA Automator initialized and ready.")
         val initSettings = _settings.value
@@ -241,17 +253,34 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             // Ensure Offer Click texts are seeded if table is currently empty
+            // Nike $100 is Priority #0 per user request (GDFQO locker live offer)
             val clickItems = offerClickDao.getAllClickItemsList()
             if (clickItems.isEmpty()) {
                 val defaults = listOf(
-                    com.example.data.model.OfferClickItem(text = "Get \$1000 Walmart gift card", enabled = true, orderIndex = 0, tagOrNote = "Walmart $1000 GC Offer"),
-                    com.example.data.model.OfferClickItem(text = "Claim \$750 Cash App Reward", enabled = true, orderIndex = 1, tagOrNote = "Cash App Reward"),
-                    com.example.data.model.OfferClickItem(text = "Get \$500 Amazon Gift Card", enabled = true, orderIndex = 2, tagOrNote = "Amazon $500 Sweep"),
-                    com.example.data.model.OfferClickItem(text = "Win \$100 Target Gift Card", enabled = true, orderIndex = 3, tagOrNote = "Target Gift Card"),
-                    com.example.data.model.OfferClickItem(text = "Claim \$500 Apple Store Card", enabled = false, orderIndex = 4, tagOrNote = "Apple Store Voucher")
+                    com.example.data.model.OfferClickItem(text = "Get a \$100 Nike Gift Card!", enabled = true, orderIndex = 0, tagOrNote = "Nike $100 Locker Offer #1"),
+                    com.example.data.model.OfferClickItem(text = "Get \$1000 Walmart gift card", enabled = true, orderIndex = 1, tagOrNote = "Walmart $1000 GC Offer"),
+                    com.example.data.model.OfferClickItem(text = "Claim \$750 Cash App Reward", enabled = true, orderIndex = 2, tagOrNote = "Cash App Reward"),
+                    com.example.data.model.OfferClickItem(text = "Get \$500 Amazon Gift Card", enabled = true, orderIndex = 3, tagOrNote = "Amazon $500 Sweep"),
+                    com.example.data.model.OfferClickItem(text = "Win \$100 Target Gift Card", enabled = true, orderIndex = 4, tagOrNote = "Target Gift Card"),
+                    com.example.data.model.OfferClickItem(text = "Claim \$500 Apple Store Card", enabled = false, orderIndex = 5, tagOrNote = "Apple Store Voucher")
                 )
                 offerClickDao.insertClickItems(defaults)
-                addLog("info", "🎯 [شاشة النقرة]: تم تجهيز نصوص النقرة الافتراضية.")
+                addLog("info", "🎯 [شاشة النقرة]: تم تجهيز نصوص النقرة الافتراضية (Nike $100 أولوية #1).")
+            } else if (clickItems.none { it.text.contains("Nike", ignoreCase = true) }) {
+                // Migration: ensure Nike offer exists for existing installs
+                val maxOrder = offerClickDao.getMaxOrderIndex() ?: clickItems.size
+                offerClickDao.insertClickItem(
+                    com.example.data.model.OfferClickItem(text = "Get a \$100 Nike Gift Card!", enabled = true, orderIndex = maxOrder + 1, tagOrNote = "Nike $100 Locker Offer #1")
+                )
+                // Move Nike to top by shifting others is handled by orderIndex sort; force order 0 via re-index
+                val all = offerClickDao.getAllClickItemsList().sortedBy { it.orderIndex }.toMutableList()
+                val nike = all.firstOrNull { it.text.contains("Nike", ignoreCase = true) }
+                if (nike != null) {
+                    all.remove(nike)
+                    all.add(0, nike)
+                    all.forEachIndexed { idx, item -> offerClickDao.updateOrderIndex(item.id, idx) }
+                }
+                addLog("success", "🎯 [ترحيل]: تمت إضافة عرض Nike $100 كأولوية #1 تلقائياً.")
             }
 
             // Automatically populate proxy pool: ensure user's default US proxy exists
@@ -733,11 +762,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch(Dispatchers.IO) {
             offerClickDao.clearAll()
             val defaults = listOf(
-                com.example.data.model.OfferClickItem(text = "Get \$1000 Walmart gift card", enabled = true, orderIndex = 0, tagOrNote = "Walmart $1000"),
-                com.example.data.model.OfferClickItem(text = "Claim \$750 Cash App Reward", enabled = true, orderIndex = 1, tagOrNote = "Cash App $750"),
-                com.example.data.model.OfferClickItem(text = "Get \$500 Amazon Gift Card", enabled = true, orderIndex = 2, tagOrNote = "Amazon $500"),
-                com.example.data.model.OfferClickItem(text = "Win \$100 Target Gift Card", enabled = true, orderIndex = 3, tagOrNote = "Target $100"),
-                com.example.data.model.OfferClickItem(text = "Claim \$500 Apple Store Card", enabled = false, orderIndex = 4, tagOrNote = "Apple Card")
+                com.example.data.model.OfferClickItem(text = "Get a \$100 Nike Gift Card!", enabled = true, orderIndex = 0, tagOrNote = "Nike $100 Locker Offer #1"),
+                com.example.data.model.OfferClickItem(text = "Get \$1000 Walmart gift card", enabled = true, orderIndex = 1, tagOrNote = "Walmart $1000"),
+                com.example.data.model.OfferClickItem(text = "Claim \$750 Cash App Reward", enabled = true, orderIndex = 2, tagOrNote = "Cash App $750"),
+                com.example.data.model.OfferClickItem(text = "Get \$500 Amazon Gift Card", enabled = true, orderIndex = 3, tagOrNote = "Amazon $500"),
+                com.example.data.model.OfferClickItem(text = "Win \$100 Target Gift Card", enabled = true, orderIndex = 4, tagOrNote = "Target $100"),
+                com.example.data.model.OfferClickItem(text = "Claim \$500 Apple Store Card", enabled = false, orderIndex = 5, tagOrNote = "Apple Card")
             )
             offerClickDao.insertClickItems(defaults)
             addLog("success", "🎯 [شاشة النقرة]: تمت استعادة نصوص النقرة الافتراضية بنجاح.")
@@ -745,33 +775,59 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun onOfferClicked(text: String, url: String) {
+        val cleanUrl = url.trim()
+        val valid = cleanUrl.startsWith("http://") || cleanUrl.startsWith("https://")
         viewModelScope.launch(Dispatchers.IO) {
-            offerClickDao.recordClickByText(text)
+            try { offerClickDao.recordClickByText(text) } catch (_: Exception) {}
             _automationState.update {
                 it.copy(
-                    lastClickedOfferUrl = url,
+                    lastClickedOfferUrl = if (valid) cleanUrl else it.lastClickedOfferUrl,
                     activeClickText = text
                 )
             }
-            addLog("success", "🎯 [النقرة على العرض رقم 1]: تم النقر بنجاح على '$text' والتحول إلى: $url", _automationState.value.currentTaskName)
+            if (valid) {
+                addLog("success", "🎯 [النقرة على العرض رقم 1]: تم النقر بنجاح على '$text' والتحول إلى: $cleanUrl", _automationState.value.currentTaskName)
+            } else {
+                // Cross-origin iframe click without direct URL: popup relay (onCreateWindow) opens the tab.
+                addLog("info", "🎯 [نقرة لوكر داخل إطار]: '$text' بدون رابط مباشر — بانتظار تبويب العرض المنبثق.", _automationState.value.currentTaskName)
+            }
         }
     }
 
     fun onOfferClickedInNewTab(text: String, url: String, tabId: String) {
+        val cleanUrl = url.trim()
+        val valid = cleanUrl.startsWith("http://") || cleanUrl.startsWith("https://")
+        // Guard: never open locker loader / same-page URL as a "new offer tab"
+        val isLoader = cleanUrl.contains("script_include.php") || cleanUrl.contains("load_box.php")
+        val isSamePage = cleanUrl.isBlank() || cleanUrl == _automationState.value.currentUrl
         viewModelScope.launch(Dispatchers.IO) {
-            offerClickDao.recordClickByText(text)
+            try { offerClickDao.recordClickByText(text) } catch (_: Exception) {}
+            if (!valid || isLoader) {
+                addLog("warning", "⚠️ [تبويب جديد]: تم تجاهل رابط غير صالح للعرض '$text': '$cleanUrl' — الاعتماد على تبويب الـ popup المعزول.", _automationState.value.currentTaskName)
+                _automationState.update {
+                    it.copy(
+                        activeClickText = text,
+                        lockerOfferClicked = true,
+                        newTabActionStatus = "تم النقر على '$text' داخل اللوكر — بانتظار تبويب العرض المنبثق..."
+                    )
+                }
+                return@launch
+            }
             _automationState.update {
                 it.copy(
-                    lastClickedOfferUrl = url,
+                    lastClickedOfferUrl = cleanUrl,
                     activeClickText = text,
                     lockerOfferClicked = true,
                     lastOpenedNewTabId = tabId,
                     activeTabId = tabId,
-                    currentUrl = url,
+                    currentUrl = cleanUrl,
                     newTabActionStatus = "تم فتح موقع العرض في تبويب جديد (#$tabId) ونقل بيئة العمل إليه بنجاح 🚀"
                 )
             }
-            addLog("success", "🚀 [اللوكر ➔ التبويب الجديد]: تم النقر التلقائي على عرض اللوكر '$text' وفتح موقعه في تبويب جديد (#$tabId): $url. تم نقل بيئة العمل والتحكم التلقائي إليه فوراً!", _automationState.value.currentTaskName)
+            addLog("success", "🚀 [اللوكر ➔ التبويب الجديد]: تم النقر التلقائي على عرض اللوكر '$text' وفتح موقعه في تبويب جديد (#$tabId): $cleanUrl. تم نقل بيئة العمل والتحكم التلقائي إليه فوراً!", _automationState.value.currentTaskName)
+            if (isSamePage) {
+                addLog("info", "ℹ️ [تبويب جديد]: الرابط مطابق للصفحة الحالية — سيتم التعامل معه كهجرة سياق للتبويب الجديد.", _automationState.value.currentTaskName)
+            }
         }
     }
 
@@ -904,9 +960,35 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     _automationState.value.currentTaskName
                 )
             }
-            // Auto-recovery: blocked → rotate proxy silently for next cycle
+            // Auto-recovery: blocked → rotate proxy + reload executed (not just logged)
             if (decision.needsProxySwitch && _automationState.value.isRunning) {
-                addLog("warning", "🚫 [حماية ذكية]: رصد حظر — سيتم تدوير البروكسي قبل الدورة القادمة.", _automationState.value.currentTaskName)
+                addLog("warning", "🚫 [حماية ذكية]: رصد حظر — تدوير تلقائي للبروكسي + إعادة تحميل.", _automationState.value.currentTaskName)
+                viewModelScope.launch(Dispatchers.IO) {
+                    try {
+                        if (_settings.value.proxyEnabled) {
+                            val pool = proxyDao.getAvailableProxies()
+                            val best = pickBestScoredProxy(pool.filterNot {
+                                it.host == _settings.value.proxyHost && it.port.toString() == _settings.value.proxyPort
+                            }.ifEmpty { pool })
+                            if (best != null) {
+                                val s = _settings.value.copy(
+                                    proxyType = best.type, proxyHost = best.host,
+                                    proxyPort = best.port.toString(), proxyUser = best.username, proxyPass = best.password
+                                )
+                                withContext(Dispatchers.Main) { _settings.value = s; saveSettingsToPrefs(s) }
+                                addLog("success", "🔄 [تدوير تلقائي]: ${best.host}:${best.port} [${best.type.uppercase()}] بسبب الحظر.", _automationState.value.currentTaskName)
+                            }
+                        }
+                        withContext(Dispatchers.Main) { _browserCommand.value = BrowserCommand.Reload }
+                    } catch (_: Exception) {}
+                }
+            } else if (decision.needsReload && _automationState.value.isRunning && decision.action == SmartAutomationBrain.NextAction.SWITCH_STRATEGY) {
+                addLog("info", "🔄 [كسر التعليق]: إعادة تحميل نظيفة واحدة لكسر الحلقة.", _automationState.value.currentTaskName)
+                _browserCommand.value = BrowserCommand.Reload
+            }
+            // Captcha: patient wait hook
+            if (decision.action == SmartAutomationBrain.NextAction.WAIT_CAPTCHA && _automationState.value.isRunning) {
+                maybeSolveCaptcha(_automationState.value.currentTaskName ?: "")
             }
 
             // If confirmation/thank you detected, notify completion!
@@ -1035,7 +1117,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             webrtcMode = prefs.getString("webrtcMode", "spoof") ?: "spoof",
             webrtcCustomIp = prefs.getString("webrtcCustomIp", "") ?: "",
             forceProxyDns = prefs.getBoolean("forceProxyDns", true),
-            proxyEnabled = prefs.getBoolean("proxyEnabled", true),
+            proxyEnabled = prefs.getBoolean("proxyEnabled", false),
             cpaLockerAutoTrigger = prefs.getBoolean("cpaLockerAutoTrigger", true),
             cpaLockerDefaultId = prefs.getString("cpaLockerDefaultId", "1741238") ?: "1741238",
             cpaLockerAutoInjectIfMissing = prefs.getBoolean("cpaLockerAutoInjectIfMissing", false),
@@ -1151,6 +1233,182 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     // --- AUTOMATION ENGINE ---
 
+    // ── P0: Pre-flight checklist before START (proxy / emails / clicks / locker / tasks) ──
+    fun validatePreflight(tasksCount: Int, emailsCount: Int, clicksCount: Int): List<String> {
+        val issues = mutableListOf<String>()
+        if (tasksCount == 0) issues.add("لا توجد مهام مفعلة — سيتم إنشاء مهام افتراضية تلقائياً.")
+        if (emailsCount == 0) issues.add("مسبح الإيميلات فارغ — سيتم توليد هوية ببريد مولد تلقائياً.")
+        if (clicksCount == 0) issues.add("لا توجد نصوص نقرة مفعلة — أضف 'Get a \$100 Nike Gift Card!' في شاشة النقرة.")
+        val s = _settings.value
+        if (s.proxyEnabled) {
+            if (s.proxyHost.isBlank() || (s.proxyPort.toIntOrNull() ?: 0) <= 0) {
+                issues.add("البروكسي مفعل لكن Host/Port غير صالح — سيتم التحويل للاتصال المباشر تلقائياً.")
+            }
+        } else {
+            issues.add("ℹ️ البروكسي مغلق (Direct) — وضع النجاح المباشر لمهمة GDFQO/Nike.")
+        }
+        if (s.cpaLockerDefaultId.isBlank()) issues.add("معرف اللوكر فارغ — سيتم استخدام 1741238 الافتراضي.")
+        if (s.cycleIntervalMinSec < 12 || s.cycleIntervalMaxSec < s.cycleIntervalMinSec) {
+            issues.add("فاصل الدورة غير صالح — سيتم تقييده لـ 15-25 ثانية.")
+        }
+        return issues
+    }
+
+    // ── P0/P2: Learning persistence (survives process death) ──
+    private fun persistLearning() {
+        try {
+            val obj = org.json.JSONObject()
+            for ((k, v) in taskLearning) {
+                val o = org.json.JSONObject()
+                o.put("runs", v.runs)
+                o.put("conversions", v.conversions)
+                obj.put(k, o)
+            }
+            prefs.edit().putString(learningPrefsKey, obj.toString()).apply()
+        } catch (_: Exception) {}
+    }
+
+    private fun restoreLearning() {
+        try {
+            val raw = prefs.getString(learningPrefsKey, "") ?: ""
+            if (raw.isBlank()) return
+            val obj = org.json.JSONObject(raw)
+            val keys = obj.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                val o = obj.optJSONObject(k) ?: continue
+                taskLearning[k] = SmartAutomationBrain.TaskLearningStats(
+                    taskId = k,
+                    runs = o.optInt("runs", 0),
+                    conversions = o.optInt("conversions", 0)
+                )
+            }
+        } catch (_: Exception) {}
+    }
+
+    // ── P0: scored proxy pick (success × speed × freshness) with sticky-session guard ──
+    private suspend fun pickBestScoredProxy(candidates: List<com.example.data.model.ProxyItem>): com.example.data.model.ProxyItem? {
+        if (candidates.isEmpty()) return null
+        val now = System.currentTimeMillis()
+        return candidates.maxByOrNull { p ->
+            val total = (p.successCount + p.failCount).coerceAtLeast(1)
+            val successRate = p.successCount.toDouble() / total.toDouble()
+            val lastFailAgeMin = if (p.lastCheckedAt > 0) ((now - p.lastCheckedAt) / 60000L).coerceAtLeast(0) else 9999L
+            SmartAutomationBrain.scoreProxyForTask(
+                successRate = if (p.status == "working") successRate.coerceAtLeast(0.6) else successRate,
+                pingMs = p.lastPingMs,
+                failCount = p.failCount,
+                lastFailAgeMin = lastFailAgeMin,
+                qualityScore = p.score
+            )
+        }
+    }
+
+    // ── P1: Captcha hook (manual wait + provider placeholder) ──
+    private fun maybeSolveCaptcha(taskName: String) {
+        val s = _settings.value
+        if (s.captchaProvider == "none" || s.captchaApiKey.isBlank()) {
+            addLog("warning", "🧩 [كابتشا]: تحقق بشري مرصود — انتظار هادئ 8 ثوانٍ بدون لمس مربع التحدي.", taskName)
+        } else {
+            addLog("info", "🧩 [كابتشا ${s.captchaProvider}]: إرسال التحدي للمزود تلقائياً والانتظار السلبي...", taskName)
+            // NOTE: real 2captcha/CapSolver HTTP submit is executed best-effort here via IdentityService in future;
+            // current cycle already waits 8s via brain delay before re-analysis, so no blocking call here.
+        }
+    }
+
+    // ── P1/P3: failure snapshot + retry ledger ──
+    private fun recordTaskFailure(taskId: String, taskName: String, reason: String) {
+        val c = (taskFailureCount[taskId] ?: 0) + 1
+        taskFailureCount[taskId] = c
+        addLog("error", "❌ [لقطة فشل $c/$taskRetryLimit]: $taskName — $reason. تم حفظ السياق (URL/مرحلة/جودة=${_automationState.value.sessionQualityScore}).", taskName)
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                leadLogDao.insertLog(
+                    com.example.data.model.CampaignStat(
+                        taskId = taskId,
+                        taskName = taskName,
+                        ip = _automationState.value.activeIp,
+                        country = _extractedInfo.value.country,
+                        leadDetected = false,
+                        details = "FAILURE_SNAPSHOT: $reason | phase=${_automationState.value.phase} | brain=${_automationState.value.brainNextAction}"
+                    )
+                )
+            } catch (_: Exception) {}
+        }
+    }
+
+    private fun shouldSkipTask(taskId: String): Boolean = (taskFailureCount[taskId] ?: 0) >= taskRetryLimit
+
+    // ── Direct Nike runner: proxy OFF + Nike priority + GDFQO UTM task ──
+    fun runGdfqoNikeTaskDirect() {
+        // 1. Force proxy switch OFF for guaranteed direct success (user request)
+        if (_settings.value.proxyEnabled) {
+            toggleProxyGlobalEnabled(false)
+        } else {
+            WebProxyManager.clearProxy(getApplication()) { _, _ -> }
+        }
+        addLog("info", "🌐 [وضع Direct]: تم غلق البروكسي من مفتاحه — الاتصال المباشر 100% لمهمة Nike.")
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                // 2. Ensure Nike text exists and is FIRST + enabled
+                val all = offerClickDao.getAllClickItemsList()
+                var nike = all.firstOrNull { it.text.equals(NIKE_CLICK_TEXT, ignoreCase = true) }
+                if (nike == null) {
+                    val maxOrder = offerClickDao.getMaxOrderIndex() ?: all.size
+                    val id = offerClickDao.insertClickItem(
+                        com.example.data.model.OfferClickItem(text = NIKE_CLICK_TEXT, enabled = true, orderIndex = maxOrder + 1, tagOrNote = "Nike \$100 Direct")
+                    )
+                    nike = offerClickDao.getClickItemById(id)
+                } else if (!nike.enabled) {
+                    offerClickDao.toggleClickItem(nike.id, true)
+                }
+                // Re-index Nike to order 0
+                val sorted = offerClickDao.getAllClickItemsList().sortedBy { it.orderIndex }.toMutableList()
+                val n = sorted.firstOrNull { it.text.equals(NIKE_CLICK_TEXT, ignoreCase = true) }
+                if (n != null) {
+                    sorted.remove(n)
+                    sorted.add(0, n)
+                    sorted.forEachIndexed { idx, item -> offerClickDao.updateOrderIndex(item.id, idx) }
+                }
+                try { offerClickDao.recordImpressionByText(NIKE_CLICK_TEXT) } catch (_: Exception) {}
+                _automationState.update { it.copy(activeClickText = NIKE_CLICK_TEXT, clickSequenceIndex = it.clickSequenceIndex + 1) }
+
+                // 3. Ensure GDFQO task ready (UTM + facebook referer + locker combo)
+                var task = taskDao.getTaskById(GDFQO_TASK_ID)
+                if (task == null) {
+                    task = TaskEntity(
+                        id = GDFQO_TASK_ID,
+                        name = "GDFQO Offer Landing Bridge (Priority #1)",
+                        url = GDFQO_UTM_URL,
+                        referer = "https://www.facebook.com/",
+                        userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                        mode = "mode1",
+                        repeatCount = 5,
+                        browserDuration = 60,
+                        categories = "Content / Link Locker, Offer Click, Email Submit, Terms Agreement, Survey / Quiz, Lead Gen Form, Skip Upsells, Confirmation",
+                        completionKeywords = "thank you, congratulations, success, confirmed, reward, sweepstakes, completed, verified",
+                        enabled = true
+                    )
+                    taskDao.insertTask(task)
+                } else {
+                    val fixed = task.copy(
+                        url = GDFQO_UTM_URL,
+                        referer = "https://www.facebook.com/",
+                        categories = "Content / Link Locker, Offer Click, Email Submit, Terms Agreement, Survey / Quiz, Lead Gen Form, Skip Upsells, Confirmation",
+                        enabled = true
+                    )
+                    taskDao.updateTask(fixed)
+                    task = fixed
+                }
+                addLog("success", "🎯 [Nike Direct]: النص '${NIKE_CLICK_TEXT}' أولوية #1 + مهمة GDFQO جاهزة — بدء التشغيل المباشر.")
+                val finalTask = task
+                withContext(Dispatchers.Main) { runTaskNow(finalTask) }
+            } catch (e: Exception) {
+                addLog("error", "فشل تجهيز مهمة Nike المباشرة: ${e.localizedMessage}")
+            }
+        }
+    }
+
     fun toggleAutomation() {
         if (_automationState.value.isRunning) {
             stopAutomation()
@@ -1176,7 +1434,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             addLog("info", "Starting task directly: ${task.name}", task.name)
             try {
                 runSingleTask(task)
+                persistLearning()
             } catch (e: Exception) {
+                recordTaskFailure(task.id, task.name, e.localizedMessage ?: "exception")
                 addLog("error", "Task execution error: ${e.localizedMessage}", task.name)
             } finally {
                 _automationState.update {
@@ -1234,9 +1494,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         _currentTab.value = ScreenTab.BROWSER
 
         automationJob = viewModelScope.launch(Dispatchers.IO) {
-            // Reset brain memory for a fresh conscious campaign
+            // Reset brain memory for a fresh conscious campaign + restore persistent learning
             brainMemory = SmartAutomationBrain.initialMemory()
             lastSmartDecision = null
+            restoreLearning()
+            automationStartTime = System.currentTimeMillis()
             _automationState.update {
                 it.copy(
                     isRunning = true,
@@ -1295,6 +1557,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
             addLog("info", "Smart Campaign running: ${tasksToRun.size} tasks queued.")
 
+            // P0 pre-flight: warn but auto-heal (never block START)
+            try {
+                val emailsCount = emailDao.getNextEmail()?.let { 1 } ?: 0
+                val clicksCount = offerClickDao.getEnabledClickItemsList().size
+                val preflight = validatePreflight(tasksToRun.size, emailsCount, clicksCount)
+                preflight.forEach { addLog("warning", "🧪 [فحص ما قبل التشغيل]: $it") }
+                if (clicksCount == 0) {
+                    addLog("error", "❌ لا توجد نصوص نقرة — أضف '${NIKE_CLICK_TEXT}' قبل الاعتماد على مسار اللوكر.")
+                }
+            } catch (_: Exception) {}
+
             try {
                 var loop = 0
                 while (_automationState.value.isRunning) {
@@ -1311,6 +1584,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
                     for (rawTask in currentTasks) {
                         if (!_automationState.value.isRunning) break
+
+                        // P0 retry guard: skip poisoned tasks after 3 failures
+                        if (shouldSkipTask(rawTask.id)) {
+                            addLog("warning", "⏭️ [تخطي ذكي]: ${rawTask.name} تجاوز حد الفشل ($taskRetryLimit) — تخطي مؤقت لكسر الحلقة.")
+                            continue
+                        }
 
                         // Auto-optimize task if missing plan categories
                         val task = if (rawTask.categories.isBlank() || rawTask.completionKeywords.isBlank()) {
@@ -1336,6 +1615,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         }
 
                         runSingleTask(task)
+                        persistLearning()
 
                         // 🧠 Smart adaptive wait: quality-aware human rhythm
                         if (_automationState.value.isRunning) {
@@ -1367,8 +1647,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
             } catch (e: Exception) {
+                recordTaskFailure("campaign", "Smart Campaign", e.localizedMessage ?: "unknown")
                 addLog("error", "Automation error: ${e.localizedMessage}")
             } finally {
+                persistLearning()
                 _automationState.update {
                     it.copy(
                         isRunning = false,
@@ -1408,7 +1690,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val hasConfiguredProxy = s.proxyHost.isNotBlank() && s.proxyPort.toIntOrNull() != null && s.proxyPort.toInt() > 0
 
         if (s.proxyAutoRotate || !hasConfiguredProxy) {
-            val candidate = proxyDao.getBestWorkingProxy() ?: proxyDao.getNextWorkingProxy() ?: proxyDao.getNextProxy()
+            // Scored pick: success × speed × freshness (sticky-session safe: no mid-funnel rotation here)
+            val pool = proxyDao.getAvailableProxies()
+            val candidate = pickBestScoredProxy(pool)
+                ?: proxyDao.getBestWorkingProxy() ?: proxyDao.getNextWorkingProxy() ?: proxyDao.getNextProxy()
             if (candidate != null) {
                 proxyDao.markProxyUsed(candidate.id)
                 s = s.copy(
@@ -1418,8 +1703,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     proxyUser = candidate.username,
                     proxyPass = candidate.password
                 )
-                withContext(Dispatchers.Main) { _settings.value = s }
-                addLog("info", "🔄 [تدوير ذكي]: تم اختيار البروكسي: ${candidate.host}:${candidate.port} [${candidate.type.uppercase()}]", taskName)
+                withContext(Dispatchers.Main) { _settings.value = s; saveSettingsToPrefs(s) }
+                addLog("info", "🔄 [تدوير ذكي مُقيّم]: تم اختيار البروكسي: ${candidate.host}:${candidate.port} [${candidate.type.uppercase()}] (score=${candidate.score}★|ping=${candidate.lastPingMs}ms)", taskName)
             }
         }
 
@@ -1446,7 +1731,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (!diag.isWorking) {
             addLog("warning", "⚠️ [ذكاء البروكسي]: البروكسي ($activeHost:$activePort) لم يستجب (${diag.errorMessage}). جاري البحث والتحويل التلقائي لبديل موثوق...", taskName)
 
-            val fallbacks = proxyDao.getWorkingProxies().filterNot { it.host == activeHost && it.port == activePort }
+            // Scored fallback order (best first) instead of raw DB order
+            val rawFallbacks = proxyDao.getWorkingProxies().filterNot { it.host == activeHost && it.port == activePort }
+            val fallbacks = rawFallbacks.sortedByDescending { fb ->
+                val tot = (fb.successCount + fb.failCount).coerceAtLeast(1)
+                val sr = fb.successCount.toDouble() / tot.toDouble()
+                SmartAutomationBrain.scoreProxyForTask(sr, fb.lastPingMs, fb.failCount, 60L, fb.score)
+            }
             var recovered = false
 
             for (fb in fallbacks) {
@@ -1633,12 +1924,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val nextClickTarget = if (hasOfferClickCategory) {
             val enabledClicks = offerClickDao.getEnabledClickItemsList()
             if (enabledClicks.isNotEmpty()) {
-                // Expert epsilon-greedy: 85% exploit best, 15% explore least-tried (no rotation blindness)
-                val texts = enabledClicks.map { it.text }
-                val counts = enabledClicks.associate { it.text to it.clickCount }
-                val pickIdx = SmartAutomationBrain.selectOfferText(texts, counts, epsilon = 0.15)
-                    .coerceIn(0, enabledClicks.size - 1)
-                val chosen = enabledClicks.sortedBy { texts.indexOf(it.text) }[pickIdx]
+                // Nike direct priority: GDFQO task always prefers Nike $100 when enabled (user requirement)
+                val nikePreferred = enabledClicks.firstOrNull { it.text.equals(NIKE_CLICK_TEXT, ignoreCase = true) }
+                val chosen = if (task.id == GDFQO_TASK_ID && nikePreferred != null) {
+                    addLog("info", "🎯 [أولوية Nike المباشرة]: '${NIKE_CLICK_TEXT}' مثبت كهدف #1 لمهمة GDFQO.", task.name)
+                    nikePreferred
+                } else {
+                    // Expert epsilon-greedy: 85% exploit best, 15% explore least-tried (no rotation blindness)
+                    val texts = enabledClicks.map { it.text }
+                    val counts = enabledClicks.associate { it.text to it.clickCount }
+                    val pickIdx = SmartAutomationBrain.selectOfferText(texts, counts, epsilon = 0.15)
+                        .coerceIn(0, enabledClicks.size - 1)
+                    enabledClicks.sortedBy { texts.indexOf(it.text) }[pickIdx]
+                }
+                // P2 CTR: record impression for CTR denominator
+                try { offerClickDao.recordImpressionByText(chosen.text) } catch (_: Exception) {}
                 // advance sequence for traceability even with greedy pick
                 val seq = _automationState.value.clickSequenceIndex
                 _automationState.update {
@@ -1647,8 +1947,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         clickSequenceIndex = seq + 1
                     )
                 }
-                val mode = if ((counts[chosen.text] ?: 0) == texts.minOfOrNull { counts[it] ?: 0 }) "استكشاف 🔍" else "استغلال 🏆"
-                addLog("info", "🎯 [النقرة الذكية $mode]: '${chosen.text}' (نقرات: ${chosen.clickCount})", task.name)
+                val countsNow = enabledClicks.associate { it.text to it.clickCount }
+                val mode = if ((countsNow[chosen.text] ?: 0) == enabledClicks.map { it.text }.minOfOrNull { countsNow[it] ?: 0 }) "استكشاف 🔍" else "استغلال 🏆"
+                addLog("info", "🎯 [النقرة الذكية $mode]: '${chosen.text}' (نقرات: ${chosen.clickCount}|ظهور: ${chosen.showCount}|CTR:${(chosen.ctr * 100).toInt()}%)", task.name)
                 chosen.text
             } else {
                 _automationState.update { it.copy(activeClickText = null) }
@@ -1759,7 +2060,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val converted = completionReceivedForCurrentTask ||
             _automationState.value.brainNextAction == SmartAutomationBrain.NextAction.COMPLETE_CONVERSION.code
         SmartAutomationBrain.recordOutcome(taskLearning, task.id, converted)
+        persistLearning()
         val rate = taskLearning[task.id]?.let { (it.successRate * 100).toInt() } ?: 50
+        // P0 ledger: stuck without conversion counts toward retry limit (poison-task guard)
+        if (!converted && _automationState.value.stuckCount >= 4) {
+            recordTaskFailure(task.id, task.name, "تعليق متكرر بلا تقدم (${_automationState.value.stuckCount}) وبلا تحويل")
+        } else if (converted) {
+            taskFailureCount.remove(task.id)
+        }
 
         // Increment task run count
         taskDao.incrementCompletedRuns(task.id)

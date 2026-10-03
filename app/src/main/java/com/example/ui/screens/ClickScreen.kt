@@ -108,6 +108,7 @@ fun ClickScreen(
     onTestInBrowser: (text: String) -> Unit,
     onLaunchLandingBlogspot: () -> Unit,
     onRunAutomation: () -> Unit,
+    onRunNikeDirect: () -> Unit = onRunAutomation,
     modifier: Modifier = Modifier
 ) {
     var newText by remember { mutableStateOf("") }
@@ -594,7 +595,7 @@ fun ClickScreen(
                         }
 
                         Button(
-                            onClick = onRunAutomation,
+                            onClick = onRunNikeDirect,
                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
                             shape = RoundedCornerShape(6.dp),
                             colors = ButtonDefaults.buttonColors(containerColor = if (automationState.isRunning) CpaError else CpaSuccess)
@@ -605,7 +606,7 @@ fun ClickScreen(
                                 modifier = Modifier.size(13.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text(if (automationState.isRunning) "إيقاف" else "تشغيل #1", fontSize = 10.sp)
+                            Text(if (automationState.isRunning) "إيقاف" else "تشغيل Nike Direct", fontSize = 10.sp)
                         }
                     }
                 }

@@ -241,6 +241,12 @@ interface OfferClickDao {
     @Query("UPDATE offer_click_items SET clickCount = clickCount + 1, lastClickedAt = :timestamp WHERE text = :text")
     suspend fun recordClickByText(text: String, timestamp: Long = System.currentTimeMillis())
 
+    @Query("UPDATE offer_click_items SET showCount = showCount + 1, lastShownAt = :timestamp WHERE text = :text")
+    suspend fun recordImpressionByText(text: String, timestamp: Long = System.currentTimeMillis())
+
+    @Query("UPDATE offer_click_items SET showCount = showCount + 1, lastShownAt = :timestamp WHERE id = :id")
+    suspend fun recordImpression(id: Long, timestamp: Long = System.currentTimeMillis())
+
     @Query("UPDATE offer_click_items SET clickCount = clickCount + 1, lastClickedAt = :timestamp WHERE id = :id")
     suspend fun recordClick(id: Long, timestamp: Long = System.currentTimeMillis())
 

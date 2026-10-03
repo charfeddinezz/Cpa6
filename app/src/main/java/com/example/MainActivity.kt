@@ -528,7 +528,8 @@ fun CpaAutomatorApp(vm: AppViewModel = viewModel()) {
                         onResetDefaults = { vm.resetDefaultOfferClickItems() },
                         onTestInBrowser = { vm.testOfferClickInBrowser(it) },
                         onLaunchLandingBlogspot = { vm.navigateBrowser("https://gdfqo.blogspot.com") },
-                        onRunAutomation = { vm.toggleAutomation() }
+                        onRunAutomation = { vm.toggleAutomation() },
+                        onRunNikeDirect = { vm.runGdfqoNikeTaskDirect() }
                     )
                     ScreenTab.INFO -> InfoScreen(
                     extractedInfo = extractedInfo,

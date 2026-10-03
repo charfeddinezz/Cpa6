@@ -3015,7 +3015,7 @@ true;
       var s = (allTexts[i] || '').trim().toLowerCase();
       if (s && targetList.indexOf(s) === -1) targetList.push(s);
     }
-    if (targetList.length === 0) targetList = ['walmart', 'cash app', 'gift card', '$1000', '$750', '$500', 'claim', 'survey', 'reward', 'free', 'win', 'card'];
+    if (targetList.length === 0) targetList = ['get a $100 nike gift card', 'walmart', 'cash app', 'gift card', '$1000', '$750', '$500', 'claim', 'survey', 'reward', 'free', 'win', 'card', 'nike'];
 
     function scanDocForOffers(doc, isIframe, list) {
       if (!doc) return;
@@ -3108,8 +3108,101 @@ true;
       return candidates;
     }
 
+    function normalizeOfferText(s) {
+      if (!s) return '';
+      return ('' + s).toLowerCase().replace(/[^a-z0-9$]+/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+
+    function fuzzyOfferMatch(candidateRaw, targetRaw) {
+      if (!candidateRaw || !targetRaw) return false;
+      var cand = ('' + candidateRaw).toLowerCase();
+      var targ = ('' + targetRaw).toLowerCase();
+      if (cand.indexOf(targ) !== -1) return true;
+      var cleanCand = normalizeOfferText(cand);
+      var cleanTarg = normalizeOfferText(targ);
+      if (cleanCand.indexOf(cleanTarg) !== -1) return true;
+      // Token match: all meaningful tokens (>=3 chars or $/digits) must appear.
+      // Handles "Get a $100 Nike Gift Card!" vs "Get $100 Nike Gift Card" vs line-breaks.
+      var tokens = cleanTarg.split(' ').filter(function(w) { return w.length >= 3 || /\d/.test(w); });
+      // Drop generic filler tokens so "get/a" don't dilute Nike matching
+      var strong = tokens.filter(function(w) { return ['get','and','the','for','you','your','with','card','gift','nike','100','reward','claim','free','win'].indexOf(w) !== -1 ? true : w.length >= 4; });
+      if (strong.length >= 2) {
+        var hits = 0;
+        for (var i = 0; i < strong.length; i++) { if (cleanCand.indexOf(strong[i]) !== -1) hits++; }
+        // Require at least 2 hits AND brand token (nike/walmart/amazon/cash/target/apple) when present in target
+        var brandTokens = ['nike','walmart','amazon','cash','target','apple','app','gift'];
+        var brandInTarget = null;
+        for (var b = 0; b < brandTokens.length; b++) { if (cleanTarg.indexOf(brandTokens[b]) !== -1) { brandInTarget = brandTokens[b]; break; } }
+        if (brandInTarget && cleanCand.indexOf(brandInTarget) === -1) return false;
+        if (hits >= Math.min(strong.length, 3)) return true;
+        if (hits >= 2 && cleanCand.indexOf('gift') !== -1) return true;
+      } else if (tokens.length >= 1) {
+        var allIn = true;
+        for (var j = 0; j < tokens.length; j++) { if (cleanCand.indexOf(tokens[j]) === -1) { allIn = false; break; } }
+        if (allIn) return true;
+      }
+      return false;
+    }
+
+    function resolveOfferUrl(rawHref, el) {
+      try {
+        var h = (rawHref || '').trim();
+        if (!h && el) {
+          var anchor = (el.closest) ? el.closest('a') : null;
+          if (anchor) h = anchor.href || anchor.getAttribute('href') || anchor.getAttribute('data-url') || '';
+          if (!h && el.getAttribute) h = el.getAttribute('data-url') || el.getAttribute('data-href') || '';
+          if (!h && el.getAttribute && el.getAttribute('onclick')) {
+            var m = el.getAttribute('onclick').match(/https?:\/\/[^\s'"]+/);
+            if (m) h = m[0];
+          }
+        }
+        if (!h) return '';
+        h = h.trim();
+        if (h.indexOf('javascript:') === 0 || h === '#' || h === '') return '';
+        // Resolve relative URLs against page base
+        if (h.indexOf('http') !== 0) {
+          try { h = new URL(h, document.baseURI || window.location.href).toString(); } catch(e) { return ''; }
+        }
+        if (h.indexOf('http') !== 0) return '';
+        // Never treat the locker loader itself as the offer destination
+        if (h.indexOf('script_include.php') !== -1 || h.indexOf('load_box.php') !== -1) return '';
+        if (h === window.location.href) return '';
+        return h;
+      } catch(e) { return ''; }
+    }
+
+    function dismissLandingOverlays() {
+      try {
+        // Blogger / GDPR / cookie notices that cover the locker trigger area
+        var sels = [
+          '#cookieChoiceDismiss', '.cookie-choices-button', '[aria-label*="cookie" i]',
+          '.cookie-notice button', '#cookie-notice button', '.consent button',
+          'button[id*="cookie" i]', 'button[class*="cookie" i]', 'a[class*="cookie" i]'
+        ];
+        var texts = ['got it', 'ok', 'accept', 'agree', 'allow', 'understand', 'dismiss', 'close'];
+        for (var s = 0; s < sels.length; s++) {
+          var els = document.querySelectorAll(sels[s]);
+          for (var k = 0; k < els.length; k++) {
+            try {
+              var t = ((els[k].innerText || els[k].textContent || '') + '').toLowerCase().trim();
+              if (t.length < 40 && (t === '' || texts.some(function(w){ return t.indexOf(w) !== -1; }))) {
+                if (els[k].offsetParent !== null) els[k].click();
+              }
+            } catch(e) {}
+          }
+        }
+      } catch(e) {}
+    }
+
     function executeClick(chosen) {
       if (!chosen || window.__cpa_locker_offer_clicked) return false;
+      dismissLandingOverlays();
+
+      var offerTitle = (chosen.text || 'Locker Offer').trim();
+      var offerUrl = resolveOfferUrl(chosen.href, chosen.element);
+
+      // Mark clicked only after we resolved a usable destination OR we will rely on popup relay.
+      // This prevents double-tab storms while still guaranteeing a new-tab transition.
       window.__cpa_locker_offer_clicked = true;
 
       if (window.__cpa_locker_poll_interval) {
@@ -3121,42 +3214,47 @@ true;
         window.__cpa_locker_mutation_obs = null;
       }
 
-      var offerTitle = chosen.text || 'Locker Offer';
-      var offerUrl = chosen.href;
-
-      if (!offerUrl || !offerUrl.startsWith('http')) {
-        var anchor = chosen.element.closest ? chosen.element.closest('a') : null;
-        if (anchor && anchor.href && anchor.href.startsWith('http')) {
-          offerUrl = anchor.href;
-        }
-      }
-
       console.log('[LockerAutoClicker] Successfully selected offer: ' + offerTitle + ' -> ' + offerUrl);
 
+      var shortTitle = offerTitle.length > 30 ? offerTitle.substring(0, 30) : offerTitle;
       if (window.AndroidBridge && typeof window.AndroidBridge.onLockerStatus === 'function') {
-        window.AndroidBridge.onLockerStatus('تم النقر على عرض: ' + offerTitle.take(30) + ' ➔ جاري الانتقال لتبويب جديد...');
+        try { window.AndroidBridge.onLockerStatus('تم النقر على عرض: ' + shortTitle + ' ➔ جاري الانتقال لتبويب جديد...'); } catch(e) {}
       }
 
-      if (openNewTab && window.AndroidBridge && typeof window.AndroidBridge.onOfferClickedInNewTab === 'function') {
-        window.AndroidBridge.onOfferClickedInNewTab(offerTitle, offerUrl || window.location.href);
-      } else if (window.AndroidBridge && typeof window.AndroidBridge.onOfferClicked === 'function') {
-        window.AndroidBridge.onOfferClicked(offerTitle, offerUrl || window.location.href);
-      }
-
+      // 1. Real user-like click first: lets window.open popups flow through onCreateWindow -> isolated tab.
       try {
         if (chosen.element.scrollIntoView) {
           chosen.element.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
+      } catch(e) {}
+      try {
         var mEvt = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
         chosen.element.dispatchEvent(mEvt);
-        if (chosen.element.click) {
-          chosen.element.click();
-        }
+        if (chosen.element.click) chosen.element.click();
       } catch(clickErr) {
         try { if (chosen.element.click) chosen.element.click(); } catch(e) {}
       }
 
-      if (!openNewTab && offerUrl && offerUrl.startsWith('http') && offerUrl !== window.location.href) {
+      // 2. Guaranteed new-tab transition via native bridge (uses Info-screen identity context downstream).
+      // Only with a valid http destination; otherwise the popup relay already opened the tab.
+      if (offerUrl && offerUrl.indexOf('http') === 0) {
+        if (openNewTab && window.AndroidBridge && typeof window.AndroidBridge.onOfferClickedInNewTab === 'function') {
+          try { window.AndroidBridge.onOfferClickedInNewTab(offerTitle, offerUrl); } catch(e) {}
+        } else if (window.AndroidBridge && typeof window.AndroidBridge.onOfferClicked === 'function') {
+          try { window.AndroidBridge.onOfferClicked(offerTitle, offerUrl); } catch(e) {}
+        }
+      } else {
+        // No direct URL (cross-origin iframe offer): notify status so native side keeps the popup tab
+        // and starts human simulation + Info-identity form fill there.
+        if (window.AndroidBridge && typeof window.AndroidBridge.onLockerStatus === 'function') {
+          try { window.AndroidBridge.onLockerStatus('تم النقر داخل إطار اللوكر — بانتظار تبويب العرض المنبثق لبدء التعامل بهوية شاشة المعلومات...'); } catch(e) {}
+        }
+        if (window.AndroidBridge && typeof window.AndroidBridge.onMidPageInfoExtracted === 'function') {
+          try { window.AndroidBridge.onMidPageInfoExtracted('locker_offer_clicked_no_direct_url', offerTitle.substring(0, 60)); } catch(e) {}
+        }
+      }
+
+      if (!openNewTab && offerUrl && offerUrl.indexOf('http') === 0 && offerUrl !== window.location.href) {
         setTimeout(function() {
           window.location.href = offerUrl;
         }, 500);
@@ -3178,19 +3276,18 @@ true;
 
     function scanAndExecuteOfferSelection() {
       if (window.__cpa_locker_offer_clicked) return true;
+      dismissLandingOverlays();
       var candidates = collectAllCandidates();
       if (candidates.length === 0) return false;
 
-      // Select offer based on strategy and user text targets
+      // Select offer based on strategy and user text targets (fuzzy Nike-safe matching)
       var chosen = null;
-      var priorityMatched = false;
       if (strategy === 'priority') {
         for (var c = 0; c < candidates.length; c++) {
-          var candText = candidates[c].text.toLowerCase();
+          var candText = candidates[c].text || '';
           for (var p = 0; p < targetList.length; p++) {
-            if (candText.includes(targetList[p])) {
+            if (fuzzyOfferMatch(candText, targetList[p])) {
               chosen = candidates[c];
-              priorityMatched = true;
               break;
             }
           }

@@ -58,15 +58,19 @@ data class CampaignStat(
 @Entity(tableName = "offer_click_items")
 data class OfferClickItem(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
-    val text: String, // e.g. "Get $1000 Walmart gift card"
+    val text: String, // e.g. "Get $1000 Walmart gift card" / "Get a $100 Nike Gift Card!"
     val enabled: Boolean = true, // User can close/disable specific texts
     val orderIndex: Int = 0, // Sequential execution order
     val clickCount: Int = 0, // Recorded click count
+    val showCount: Int = 0, // Impressions: times selected as active target (for CTR)
     val lastClickedAt: Long = 0L,
+    val lastShownAt: Long = 0L,
     val tagOrNote: String = "", // e.g. "Walmart $1000", "CashApp"
     val targetUrlFilter: String = "", // Optional domain or URL match
     val createdAt: Long = System.currentTimeMillis()
-)
+) {
+    val ctr: Double get() = if (showCount <= 0) 0.5 else clickCount.toDouble() / (showCount + 1)
+}
 
 data class LogEntry(
     val id: String = java.util.UUID.randomUUID().toString(),
