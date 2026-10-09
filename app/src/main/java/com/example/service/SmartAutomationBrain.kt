@@ -29,13 +29,18 @@ object SmartAutomationBrain {
         RELOAD_RETRY("reload_retry"),
         SWITCH_STRATEGY("switch_strategy"),
         EXPLORE_SCROLL("explore_scroll"),
-        SUBMIT_ADVANCE("submit_advance")
+        SUBMIT_ADVANCE("submit_advance"),
+        // إضافات الذكاء المتقدم
+        OPTIMIZE_STRATEGY("optimize_strategy"),
+        ADAPT_DELAY("adapt_delay"),
+        RECOVER_STUCK("recover_stuck"),
+        PRIORITIZE_TASKS_UCB2("prioritize_ucb2")
     }
 
     data class SmartDecision(
         val action: NextAction,
         val titleAr: String,
-        val titleEn: String,
+        titleEn: String,
         val reasonAr: String,
         val reasonEn: String,
         val confidence: Int, // 0..100
@@ -43,7 +48,12 @@ object SmartAutomationBrain {
         val prioritySteps: List<String>,
         val needsReload: Boolean = false,
         val needsProxySwitch: Boolean = false,
-        val isStuck: Boolean = false
+        val isStuck: Boolean = false,
+        // حالات الذكاء المتقدم
+        val strategyAdjustment: String? = null,
+        val adaptiveDelayFactor: Double = 1.0,
+        val explorationBoost: Double = 0.0,
+        val personalization: Map<String, Any> = emptyMap()
     )
 
     data class PageMemory(
@@ -93,7 +103,11 @@ object SmartAutomationBrain {
     )
 
     /**
-     * القرار الرئيسي: ماذا نفعل الآن؟
+     * القرار الرئيسي: ماذا نفعل الآن؟ — تحليل شامل Multi-Layer
+     * Layer 1: State Detection — ما نشاهده الآن
+     * Layer 2: Pattern Analysis — ماpatterns نلاحظها
+     * Layer 3: Predictive Analysis — ماذا سيتشكّل لاحقاً
+     * Layer 4: Strategy Synthesis — الاستراتيجية الأمثل
      */
     fun decide(
         report: TaskCategoryPlanner.PageAnalysisReport,
@@ -101,8 +115,10 @@ object SmartAutomationBrain {
         configuredCategories: List<String>,
         activeClickTarget: String?,
         memory: BrainMemory,
-        taskLearning: TaskLearningStats? = null
+        taskLearning: TaskLearningStats? = null,
+        userContext: Map<String, Any>? = null
     ): SmartDecision {
+        // ── Layer 1: State Detection — State of the Page Now ──
         val extras = parseExtras(rawJson)
         val isBlocked = detectBlocked(report, extras)
         val isCaptcha = detectCaptcha(report, extras)
@@ -110,69 +126,206 @@ object SmartAutomationBrain {
 
         val samePageRepeat = memory.consecutiveSamePage
         val noProgress = memory.consecutiveNoProgress
-        val isStuck = (samePageRepeat >= 3 && noProgress >= 2) || noProgress >= 4
+        val isStuck = calculateStuckState(samePageRepeat, noProgress, memory)
 
-        // 1) محظور — لا تعاند، بدّل الهوية/البروكسي
-        if (isBlocked) {
-            return SmartDecision(
-                action = NextAction.RELOAD_RETRY,
-                titleAr = "🚫 رصد حظر / منع — تبديل ذكي للمسار",
-                titleEn = "Block detected — smart evade",
-                reasonAr = "الصفحة تظهر رسالة حظر أو رفض (${extras.matchedBlockKeyword}). الاستمرار بنفس البروكسي يضيع الوقت ويحرق الهوية. القرار: انتظار قصير ثم إعادة تحميل بهوية/بروكسي جديد.",
-                reasonEn = "Block wall detected. Rotate identity/proxy instead of hammering.",
-                confidence = 92,
-                delayMsBeforeNextCycle = 4000,
-                prioritySteps = listOf("إيقاف التعبئة فوراً", "تسجيل سبب الحظر", "تدوير البروكسي", "إعادة المحاولة بهوية جديدة"),
-                needsReload = true,
-                needsProxySwitch = true,
-                isStuck = true
+        // Contexte enrichment from user session
+        val proxyQuality = userContext?.get("proxyQuality") ?: 1.0
+        val sessionAgeMinutes = userContext?.get("sessionAgeMin") ?: 0
+        val taskUrgency = userContext?.get("taskUrgency") ?: "normal"
+
+        // ── Layer 2: Pattern Analysis — Patterns Observed ──
+        // Pattern: block keyword severity
+        val blockSeverity = when {
+            extras.matchedBlockKeyword.contains("banned", ignoreCase = true) -> 100
+            extras.matchedBlockKeyword.contains("blocked", ignoreCase = true) -> 80
+            extras.matchedBlockKeyword.contains("forbidden", ignoreCase = true) -> 90
+            else -> 50
+        }
+
+        // Pattern: captcha difficulty
+        val captchaDifficulty = when {
+            extras.matchedCaptchaKeyword.contains("turnstile", ignoreCase = true) -> 95
+            extras.matchedCaptchaKeyword.contains("reaptcha", ignoreCase = true) -> 90
+            extras.matchedCaptchaKeyword.isNotBlank() -> 75
+            else -> 0
+        }
+
+        // Pattern: loading persistence
+        val loadingPersistence = if (isLoading) "stuck" else "transient"
+
+        // Pattern: progress history
+        val progressTrend = if (samePageRepeat >= 5) "escalating"
+            else if (samePageRepeat >= 3) "concerning"
+            else if (samePageRepeat >= 2) "monitoring"
+            else "healthy"
+
+        // Pattern: noProgress accumulation
+        val noProgressAccumulation = when {
+            noProgress >= 5 -> "critical"
+            noProgress >= 3 -> "high"
+            noProgress >= 2 -> "moderate"
+            else -> "low"
+        }
+
+        // ── Layer 3: Predictive Analysis — What Likely Happens Next ──
+        // Predict block escalation
+        val blockEscalationPredict = isBlocked && sessionAgeMinutes < 10
+            -> "high" // fresh block likely worsens
+        val blockEscalationPredict = isBlocked && sessionAgeMinutes >= 30
+            -> "medium" // block may persist
+        val blockEscalationPredict = !isBlocked && noProgress >= 4
+            -> "high" // no progress will likely continue
+        val blockEscalationPredict = !isBlocked && noProgress < 2 && samePageRepeat < 3
+            -> "low" // good momentum
+
+        // Predict captcha resolution time
+        val captchaEstimatedDelay = when {
+            captchaDifficulty >= 90 -> 12000 // hard captchas need more time
+            captchaDifficulty >= 75 -> 8000
+            else -> 5000
+        }
+
+        // Predict stuck resolution probability
+        val stuckResolutionProb = when {
+            isStuck && memory.reloadAttemptsForUrl >= 2 -> 0.3 // very low after 2 reloads
+            isStuck && memory.reloadAttemptsForUrl == 1 -> 0.5 // moderate
+            isStuck && memory.reloadAttemptsForUrl == 0 -> 0.7 // decent with fresh attempt
+            !isStuck -> 1.0 // no stuck = certain progress
+        }
+
+        // Predict conversion likelihood based on current state
+        val conversionLikelihood = when {
+            report.isConfirmationPage -> 0.95 // confirmation = near certain
+            isStuck -> 0.15 // stuck = very unlikely
+            isCaptcha -> 0.1 // captcha = unlikely until solved
+            isLoading && report.confidence > 70 -> 0.6 // loading but confident = possible
+            else -> 0.35 // default baseline
+        }
+
+        // ── Layer 4: Strategy Synthesis — The Optimal Strategy ──
+        // Strategic decision matrix
+        val strategicDecision = when {
+            isBlocked -> Map(
+                "action" to NextAction.RELOAD_RETRY.code,
+                "priority" to "critical",
+                "adjustment" to "rotate_identity_proxy",
+                "delayMultiplier" to 1.5,
+                "escalation" to blockEscalationPredict,
+                "reasonAr" to "حظر شديد — تغيير الهوية فوراً وتجنب الحظر مرة أخرى",
+                "reasonEn" to "Severe block — immediately rotate identity and avoid re-blocking",
+                "confidence" to 92
+            )
+            isCaptcha -> Map(
+                "action" to NextAction.WAIT_CAPTCHA.code,
+                "priority" to "high",
+                "adjustment" to "patient_wait",
+                "delayMultiplier" to 1.2,
+                "escalation" to "solve_captcha",
+                "reasonAr" to "كابتشا困难 — انتظار ${captchaEstimatedDelay / 1000} ثانية ثم إعادة الفحص",
+                "reasonEn" "Hard captcha — wait ${captchaEstimatedDelay / 1000}s then re-analyze",
+                "confidence" to 90
+            )
+            isStuck -> Map(
+                "action" to NextAction.SWITCH_STRATEGY.code,
+                "priority" to "critical",
+                "adjustment" to "deep_explore",
+                "delayMultiplier" to 1.3,
+                "escalation" to stuckResolutionProb,
+                "reasonAr" to "تعليق شديد — ${progressTrend} — استراتيجية الاستكشاف العميق",
+                "reasonEn" "Severe stuck — ${progressTrend} — deep exploration strategy",
+                "confidence" to 85 + (stuckResolutionProb * 10).toInt()
+            )
+            isLoading -> Map(
+                "action" to NextAction.WAIT_LOAD.code,
+                "priority" to "medium",
+                "adjustment" to "wait_then_reanalyze",
+                "delayMultiplier" to when(report.confidence < 30) 1.5 else 1.1,
+                "escalation" to "reload_if_stuck",
+                "reasonAr" to "تحميل ${loadingPersistence} — ${if (report.confidence < 30) "إعادة تحليل عاجلة" else "انتظار قصير"}",
+                "reasonEn" "Loading ${loadingPersistence} — ${if (report.confidence < 30) "urgent re-analysis" else "short wait"}",
+                "confidence" to when(report.confidence < 30) 70 else 80
+            )
+            noProgress >= 4 && !isBlocked && !isCaptcha && !isLoading -> Map(
+                "action" to NextAction.SWITCH_STRATEGY.code,
+                "priority" to "high",
+                "adjustment" to "change_approach",
+                "delayMultiplier" to 1.4,
+                "escalation" to "likely_no_progress",
+                "reasonAr" to "تقدّم متعثر 4+ مرات — تغيير النهج بالكامل",
+                "reasonEn" "4+ no progress — completely change approach",
+                "confidence" to 82
+            )
+            else -> Map(
+                "action" to NextAction.EXPLORE_SCROLL.code,
+                "priority" to "normal",
+                "adjustment" to "calm_explore",
+                "delayMultiplier" to 1.0,
+                "escalation" to "gradual_progress",
+                "reasonAr" to "صفحة عادية — استكشاف هادئ ومراقبة التقدم",
+                "reasonEn" "Normal page — calm exploration and progress monitoring",
+                "confidence" to 60
             )
         }
 
-        // 2) كابتشا — انتظر ولا تخرب الحل
-        if (isCaptcha) {
-            return SmartDecision(
-                action = NextAction.WAIT_CAPTCHA,
-                titleAr = "🧩 كابتشا / تحقق بشري — وضع الانتظار الذكي",
-                titleEn = "Captcha — patient wait",
-                reasonAr = "رُصد تحقق بشري (${extras.matchedCaptchaKeyword}). النقر العشوائي الآن يفشل التحدي. القرار: تمرير هادئ وانتظار الحل (يدوي أو مزود CAPTCHA) ثم الاستئناف.",
-                reasonEn = "Captcha challenge present. Wait patiently, don't interfere.",
-                confidence = 90,
-                delayMsBeforeNextCycle = 8000,
-                prioritySteps = listOf("عدم لمس مربع الكابتشا", "تمرير خفيف طبيعي", "انتظار 8 ثوانٍ", "إعادة الفحص بعد الانتظار")
+        // Merge strategic decision with base decision
+        return SmartDecision(
+            action = NextAction.valueOf(strategicDecision["action"] ?: NextAction.EXPLORE_SCROLL.code),
+            titleAr = strategicDecision["reasonAr"] ?: when {
+                isBlocked -> "🚫 رصد حظر / منع — تبديل ذكي للمسار"
+                isCaptcha -> "🧩 كابتشا / تحقق بشري — وضع الانتظار الذكي"
+                isStuck -> "🔄 رصد تعليق — تغيير الإستراتيجية"
+                isLoading -> "⏳ الصفحة ما زالت تحمل — انتظار ذكي"
+                else -> "🌐 صفحة غير مصنفة — استكشاف هادئ"
+            },
+            titleEn = strategicDecision["reasonEn"] ?: when {
+                isBlocked -> "Block detected — smart evade"
+                isCaptcha -> "Captcha — patient wait"
+                isStuck -> "Stuck detected — switch strategy"
+                isLoading -> "Page still loading — smart wait"
+                else -> "Unclassified — calm explore"
+            },
+            reasonAr = strategicDecision["reasonAr"] ?: "",
+            reasonEn = strategicDecision["reasonEn"] ?: "",
+            confidence = strategicDecision["confidence"] ?: 60,
+            delayMsBeforeNextCycle = when {
+                isBlocked -> 4000 * strategicDecision["delayMultiplier"] as! Double
+                isCaptcha -> 8000 * strategicDecision["delayMultiplier"] as! Double
+                isStuck -> 3500 * strategicDecision["delayMultiplier"] as! Double
+                isLoading -> 3000 * strategicDecision["delayMultiplier"] as! Double
+                else -> adaptiveDelay(report, base = 5000)
+            },
+            prioritySteps = when {
+                isBlocked -> listOf("إيقاف التعبئة فوراً", "تسجيل سبب الحظر", "تدوير البروكسي", "إعادة المحاولة بهوية جديدة")
+                isCaptcha -> listOf("عدم لمس مربع الكابتشا", "تمرير خفيف طبيعي", "انتظار ${captchaEstimatedDelay / 1000} ث", "إعادة الفحص بعد الانتظار")
+                isStuck -> listOf("إيقاف التكرار الأعمى", pickEscapeStrategy(report, memory), "تمرير استكشافي عميق", "إعادة تقييم الفئة")
+                isLoading -> listOf("انتظار اكتمال التحميل", "إعادة تحليل DOM")
+                else -> listOf("تمرير تدريجي", "رصد أزرار التقدم", "إعادة التحليل بعد الاكتمال")
+            },
+            needsReload = isBlocked || (isStuck && memory.reloadAttemptsForUrl == 0 && samePageRepeat >= 5),
+            needsProxySwitch = isBlocked || proxyQuality < 0.6,
+            isStuck = isStuck,
+            strategyAdjustment = strategicDecision["action"] ?: "",
+            adaptiveDelayFactor = strategicDecision["delayMultiplier"] as? Double ?: 1.0,
+            explorationBoost = when {
+                isStuck -> 30.0
+                isBlocked -> 25.0
+                isCaptcha -> 20.0
+                noProgress >= 4 -> 15.0
+                else -> 0.0
+            },
+            personalization = mapOf(
+                "blockSeverity" to blockSeverity,
+                "captchaDifficulty" to captchaDifficulty,
+                "progressTrend" to progressTrend,
+                "noProgressAccumulation" to noProgressAccumulation,
+                "conversionLikelihood" to conversionLikelihood,
+                "stuckResolutionProb" to stuckResolutionProb,
+                "blockEscalationPredict" to blockEscalationPredict?.first,
+                "taskUrgency" to taskUrgency,
+                "sessionAgeMinutes" to sessionAgeMinutes
             )
-        }
-
-        // 3) صفحة ما زالت تحمل
-        if (isLoading || report.confidence < 40) {
-            return SmartDecision(
-                action = NextAction.WAIT_LOAD,
-                titleAr = "⏳ الصفحة ما زالت تتحمل — انتظار ذكي",
-                titleEn = "Page still loading",
-                reasonAr = "المحتوى غير مكتمل (تحميل/إعادة توجيه). التحليل الآن يعطي نتيجة مضللة. القرار: انتظار قصير ثم إعادة التحليل.",
-                reasonEn = "Incomplete load. Wait then re-analyze.",
-                confidence = 80,
-                delayMsBeforeNextCycle = 3000,
-                prioritySteps = listOf("انتظار اكتمال التحميل", "إعادة تحليل DOM")
-            )
-        }
-
-        // 4) عالق — غيّر الإستراتيجية بدل تكرار نفس الفعل
-        if (isStuck) {
-            val alternative = pickEscapeStrategy(report, memory)
-            return SmartDecision(
-                action = NextAction.SWITCH_STRATEGY,
-                titleAr = "🔄 رصد تعليق — تغيير الإستراتيجية",
-                titleEn = "Stuck detected — switch strategy",
-                reasonAr = "نفس الصفحة (${report.detectedCategoryAr}) تكررت $samePageRepeat مرات بدون تقدم. تكرار نفس النقرات لن يفيد. القرار البديل: $alternative.",
-                reasonEn = "Loop detected. Trying alternative: $alternative",
-                confidence = 85,
-                delayMsBeforeNextCycle = 3500,
-                prioritySteps = listOf("إيقاف التكرار الأعمى", alternative, "تمرير استكشافي عميق", "إعادة تقييم الفئة"),
-                needsReload = memory.reloadAttemptsForUrl == 0 && samePageRepeat >= 5,
-                isStuck = true
-            )
-        }
+        )
+    }
 
         // 5) تحويل مؤكد — أنهِ بذكاء
         if (report.isConfirmationPage) {
@@ -315,22 +468,71 @@ object SmartAutomationBrain {
     fun updateMemory(
         prev: BrainMemory,
         report: TaskCategoryPlanner.PageAnalysisReport,
-        decision: SmartDecision
+        decision: SmartDecision,
+        analysisContext: Map<String, Any>? = null
     ): BrainMemory {
+        // ── Comprehensive Memory Update with Multi-Layer Analysis ──
         val sameUrl = prev.lastUrl.isNotBlank() && normalizeUrl(prev.lastUrl) == normalizeUrl(report.url.ifBlank { prev.lastUrl })
         val sameCat = prev.lastCategory == report.detectedCategory && sameUrl
         val progressed = decision.action == NextAction.COMPLETE_CONVERSION ||
             decision.action == NextAction.CLICK_OFFER ||
-            decision.action == NextAction.SUBMIT_ADVANCE
-        val newNoProgress = if (progressed) 0 else if (sameCat) prev.consecutiveNoProgress + 1 else 0
+            decision.action == NextAction.SUBMIT_ADVANCE ||
+            decision.action == NextAction.WAIT_LOCKER
+        // Enhanced noProgress tracking with context
+        val noProgressIncrement = if (progressed) 0
+            else if (sameCat) prev.consecutiveNoProgress + 1
+            else 0
+        // Strategic noProgress: factor in analysis context
+        val strategicNoProgress = when {
+            newNoProgress >= 5 && (analysisContext?.get("blockEscalation") ?: false) -> newNoProgress + 2 // block compounding
+            newNoProgress >= 3 && (analysisContext?.get("stuckResolutionProb") ?: 0.5) > 0.7 -> 0 // reset if high resolution prob
+            newNoProgress >= 3 -> newNoProgress // standard increment
+            else -> prev.consecutiveNoProgress // maintain
+        }
+        // Enhanced consecutiveSamePage with proxy quality awareness
+        val proxyQuality = analysisContext?.get("proxyQuality") ?: 1.0
+        val samePageIncrement = if (sameUrl) prev.consecutiveSamePage + 1 else 1
+        // Decay samePage counter if proxy quality is poor (penalizing stale state)
+        val adjustedSamePage = if (proxyQuality < 0.5) 1 else samePageIncrement
+        // Enhanced reload attempts with strategic factors
+        val needsReload = decision.needsReload
+        val strategicReloads = if (needsReload && sameUrl) {
+            val baseReloads = prev.reloadAttemptsForUrl + 1
+            // Escalate reloads if block severity is high
+            val blockSeverity = analysisContext?.get("blockSeverity") ?: 0
+            if (blockSeverity > 80) baseReloads + 1 else baseReloads
+        } else 0
+        val newReloadAttempts = if (needsReload && sameUrl) prev.reloadAttemptsForUrl + 1
+            else if (!sameUrl) 0 else prev.reloadAttemptsForUrl
+        // Enhanced progress detection considering all action types
+        val advancedProgressed = decision.action == NextAction.COMPLETE_CONVERSION ||
+            decision.action == NextAction.CLICK_OFFER ||
+            decision.action == NextAction.SUBMIT_ADVANCE ||
+            // Also progress on successful locker transition
+            (decision.action == NextAction.WAIT_LOCKER && decision.personalization["conversionLikelihood"] != null)
+        val newNoProgressFinal = if (advancedProgressed) 0 else strategicNoProgress
+        // Rich page history with metadata
+        val enrichedPageMemory = PageMemory(
+            url = report.url,
+            category = report.detectedCategory,
+            timestamp = System.currentTimeMillis(),
+            // Add analysis metadata
+            blockSeverity = analysisContext?.get("blockSeverity") ?: 0,
+            captchaDifficulty = analysisContext?.get("captchaDifficulty") ?: 0,
+            progressionState = analysisContext?.get("progressTrend") ?: "unknown"
+        )
         return prev.copy(
-            pageHistory = (prev.pageHistory + PageMemory(report.url, report.detectedCategory)).takeLast(30),
-            actionTrace = (prev.actionTrace + decision.action.code).takeLast(30),
-            consecutiveSamePage = if (sameUrl) prev.consecutiveSamePage + 1 else 1,
-            consecutiveNoProgress = newNoProgress,
-            reloadAttemptsForUrl = if (decision.needsReload && sameUrl) prev.reloadAttemptsForUrl + 1 else if (!sameUrl) 0 else prev.reloadAttemptsForUrl,
+            pageHistory = (prev.pageHistory + enrichedPageMemory).takeLast(50), // Increased history
+            actionTrace = (prev.actionTrace + decision.action.code).takeLast(50),
+            consecutiveSamePage = adjustedSamePage,
+            consecutiveNoProgress = newNoProgressFinal,
+            reloadAttemptsForUrl = newReloadAttempts + strategicReloads,
             lastUrl = report.url.ifBlank { prev.lastUrl },
-            lastCategory = report.detectedCategory
+            lastCategory = report.detectedCategory,
+            // Additional metadata for external access
+            lastAnalysisTimestamp = System.currentTimeMillis(),
+            lastDecisionCode = decision.action.code,
+            lastDecisionConfidence = decision.confidence
         )
     }
 
@@ -355,16 +557,89 @@ object SmartAutomationBrain {
         learning[taskId] = cur.copy(runs = cur.runs + 1, conversions = cur.conversions + if (converted) 1 else 0)
     }
 
-    fun sessionQuality(memory: BrainMemory, conversions: Int, runs: Int): Int {
+    fun sessionQuality(memory: BrainMemory, conversions: Int, runs: Int, taskDiversity: Int = 0, proxyQuality: Double = 1.0): Int {
         var score = 70
+        //Penalty for consecutive no-progress pages
         score -= memory.consecutiveNoProgress * 8
-        if (runs > 0) score += (conversions * 100 / (runs + 1)) / 4
+        //Reward for conversions, diminishing with more runs
+        if (runs > 0) score += (conversions * 100 / (runs + 1).coerceAtLeast(1)) / 4
+        //Penalty for excessive reloads on same URL
         if (memory.reloadAttemptsForUrl > 2) score -= 15
+        //Reward for task diversity (trying different tasks/funnels)
+        score += minOf(taskDiversity * 3, 15)
+        //Penalty for low proxy quality
+        score -= (1.0 - proxyQuality) * 20
+        //Bonus for sustained sessions (many runs without major issues)
+        if (memory.consecutiveSamePage <= 2 && noProgress < 3) score += 5
         return score.coerceIn(0, 100)
     }
 
-    // ── كشف الحالات ─────────────────────────────────────────────
-    private data class Extras(
+    // ── استراتيجية تدوير البروكسي الذكية ────────────────────────────────────
+    // تحسن anonymity وتقلل من فرصة الكشف من قبل مواقع الويب
+    fun smartProxyRotationStrategy(
+        currentProxyQuality: Double,
+        failCount: Int,
+        samePageRepeat: Int,
+        noProgress: Int,
+        isResidential: Boolean,
+        sessionAgeMin: Long,
+        lastBlockDetected: Boolean
+    ): String {
+        // Determine rotation risk level
+        val riskLevel = when {
+            lastBlockDetected && failCount > 3 -> "critical"
+            failCount > 2 && samePageRepeat >= 3 -> "high"
+            failCount > 0 && noProgress >= 2 -> "moderate"
+            samePageRepeat >= 5 -> "elevated"
+            else -> "low"
+        }
+
+        // Decision logic based on risk and proxy type
+        return when {
+            // If critical block detected + many failures -> immediate rotation + residential
+            riskLevel == "critical" && !isResidential -> "rotate_to_residential_immediately"
+            // High risk + many failures -> rotate with delay
+            riskLevel == "high" -> "rotate_with_delay_5min"
+            // Elevated repeat count -> rotate but keep same type
+            riskLevel == "elevated" && samePageRepeat >= 5 -> "rotate_same_type_delay"
+            // Moderate risk -> maintain but monitor
+            riskLevel == "moderate" -> "maintain_monitor"
+            // Low risk with long session -> consider rotation for diversity
+            sessionAgeMin > 3600 && riskLevel == "low" -> "rotate_for_diversity"
+            // Low risk -> maintain current
+            riskLevel == "low" -> "maintain_current"
+            else -> "maintain_current"
+        }
+    }
+
+    // ── فحص صحة البروكسي الشامل ────────────────────────────────────
+    fun validateProxyHealth(
+        successRate: Double, // من اختبارات سابقة
+        avgPing: Long, // متوسط ping من آخر N اختبارات
+        failRate: Double, // نسبة الفشل الإجمالية
+        blockRate: Double, // نسبة الحظر الأخيرة
+        residentialRatio: Double // نسبة البروكسيات السكنية
+    ): Double {
+        // Health score from 0.0 to 1.0
+        var health = 1.0
+
+        //Penalize high failure rate
+        if (failRate > 0.3) health -= 0.3
+        if (failRate > 0.5) health -= 0.2
+
+        //Penalize high block rate
+        if (blockRate > 0.2) health -= 0.3
+        if (blockRate > 0.5) health -= 0.2
+
+        //Reward residential ratio (smarter, less detectable)
+        if (residentialRatio > 0.6) health += 0.1
+        if (residentialRatio > 0.8) health += 0.1
+
+        //Penalize very low avg ping (might indicate datacenter)
+        if (avgPing < 50) health -= 0.1 // Very low ping = suspicious
+
+        return health.coerceIn(0.0, 1.0)
+    }
         val matchedBlockKeyword: String = "",
         val matchedCaptchaKeyword: String = "",
         val matchedLoadingKeyword: String = "",
@@ -421,6 +696,20 @@ object SmartAutomationBrain {
         }
     }
 
+    // ── ذكاء متقدم: كشف حالة التعليق ──────────────────────────
+    private fun calculateStuckState(samePageRepeat: Int, noProgress: Int, memory: BrainMemory): Boolean {
+        // تعليق شديد: نفس الصفحة 5+ مرات بدون أي تقدم
+        val severeStuck = samePageRepeat >= 5 && noProgress >= 3
+        // تعليق متوسط: نفس الصفحة 3+ مرات مع تكرار الإجراءات نفسها
+        val moderateStuck = samePageRepeat >= 3 && memory.consecutiveSamePage >= 3
+        // نقص في التنوع: نفس الفئة 4+ مرات دونConversion
+        val lackOfVariety = noProgress >= 4 && memory.reloadAttemptsForUrl == 0
+        // تعليق بالاستنزاف: محاولات إعادة تحميل متعددة لنفس الصفحة
+        val exhaustionStuck = memory.reloadAttemptsForUrl >= 2 && samePageRepeat >= 2
+
+        return severeStuck || moderateStuck || lackOfVariety || exhaustionStuck
+    }
+
     private fun normalizeUrl(u: String): String =
         u.lowercase().substringBefore("?").substringBefore("#").trimEnd('/')
 
@@ -442,18 +731,28 @@ object SmartAutomationBrain {
 
     // ══ خبرة متقدمة: استغلال مقابل استكشاف (UCB1) ═══════════════
     // لا تختار دائماً الأعلى نجاحاً فتعلق في optimum محلي، بل تجرب أحياناً.
-    fun prioritizeTasksUCB(tasks: List<TaskEntity>, learning: Map<String, TaskLearningStats>): List<TaskEntity> {
+fun prioritizeTasksUCB(tasks: List<TaskEntity>, learning: Map<String, TaskLearningStats>): List<TaskEntity> {
         if (tasks.size <= 1) return tasks
-        val totalRuns = learning.values.sumOf { it.runs } + 1
+        val totalRuns = learning.values.sumOf { it.runs }.coerceAtLeast(1)
+        val explorationFactor = when {
+            totalRuns < 5 -> 1.2 // في البداية: استكشاف مكثف
+            totalRuns in 5..15 -> 1.0 //phase transition
+            totalRuns in 16..50 -> 0.8 //التقليص التدريجي
+            else -> 0.5 //التقليص بعد التعلم الكافي
+        }
         return tasks.sortedWith(
             compareByDescending<TaskEntity> { t ->
                 val s = learning[t.id]
-                if (s == null || s.runs == 0) Double.MAX_VALUE - t.createdAt / 1e15 // جرّب الجديد أولاً مرة واحدة
+                if (s == null || s.runs == 0) Double.MAX_VALUE - t.createdAt / 1e15 // جرّب الجديد مرة واحدة
                 else {
                     val avg = s.successRate
-                    val bonus = kotlin.math.sqrt(2.0 * kotlin.math.ln(totalRuns.toDouble()) / s.runs.toDouble())
-                    avg + 0.7 * bonus // معامل الاستكشاف 0.7
+                    val runs = s.runs.toDouble()
+                    val bonus = kotlin.math.sqrt(2.0 * kotlin.math.ln(totalRuns) / runs)
+                    avg + explorationFactor * bonus // معامل استكشاف متكيف
                 }
+            }.thenBy { it.completedRuns }
+        )
+    }
             }.thenBy { it.completedRuns }
         )
     }
@@ -481,11 +780,20 @@ object SmartAutomationBrain {
         return best.random()
     }
 
-    /** تقييم البروكسي: نجاح × سرعة × حداثة، مع cooldown للفاشل */
+    /** تقييم البروكسي: نجاح × سرعة × حداثة × مقاومة الكشف × ثبات الجلسة */
     fun scoreProxyForTask(
-        successRate: Double, pingMs: Long, failCount: Int, lastFailAgeMin: Long, qualityScore: Int
+        successRate: Double, pingMs: Long, failCount: Int, lastFailAgeMin: Long, qualityScore: Int,
+        // عوامل مضادة للكشف
+        isResidential: Boolean = false,
+        hasAuth: Boolean = false,
+        sessionDurationMin: Long = 0,
+        requestPattern: String = "normal",
+        // عوامل الثقة
+        trustedSource: Boolean = false
     ): Double {
         var score = successRate * 60.0
+
+        // --- قسم النجاح والسرعة ---
         score += when {
             pingMs <= 0 -> 0.0
             pingMs <= 400 -> 20.0
@@ -493,13 +801,59 @@ object SmartAutomationBrain {
             pingMs <= 3000 -> 5.0
             else -> 0.0
         }
+
+        // --- قسم الجودة ---
         score += (qualityScore / 100.0) * 10.0
+
+        --- قسم عوامل مقاومة الكشف (Anti-Detection Factors) ---
+
+        // نوع البروكسي: السكني أصعب في الكشف من الداتا سنتر
+        if (isResidential) {
+            score += 15.0 // سكني = ثقة أعلى وأقل كشف
+        } else {
+            score -= 10.0 // داتا سنتر = أكثر كشف
+        }
+
+        // وجود auth (موثوقية أعلى)
+        if (hasAuth) {
+            score += 8.0 // البروكسي بمصادقة = أكثر استقراراً
+        }
+
+        // مدة الجلسة: الجلسات الطويلة تبدو أكثر طبيعية
+        val sessionDurFactor = when {
+            sessionDurationMin >= 1440 -> 10.0 // 24 ساعة+ = طبيعية جداً
+            sessionDurationMin >= 720 -> 7.0 // 12 ساعة = طبيعية
+            sessionDurationMin >= 360 -> 5.0 // 6 ساعات = جيدة
+            sessionDurationMin >= 60 -> 3.0 // ساعة واحدة = مقبولة
+            else -> 0.0 // جلسات قصيرة = مشبوهة
+        }
+        score += sessionDurFactor
+
+        // نمط الطلب:patterns غير الطبيعيةPenalized
+        val patternFactor = when {
+            requestPattern == "human_like" -> 5.0 //_patterns طبيعية
+            requestPattern == "steady" -> 3.0 // _steady = مقبول
+            requestPattern == "burst" -> -5.0 //بسترات = suspicious
+            requestPattern == "random" -> -2.0 // arbitrary =neutral
+            else -> 0.0 // normal = baseline
+        }
+        score += patternFactor
+
+        --- قسم الث trusted source ---
+        if (trustedSource) {
+            score += 12.0 // مصادر موثوقة = درجة ثقة عالية
+        }
+
+        --- عقوبات الفشل ---
         if (failCount > 0) {
             // عقوبة تتلاشى مع الزمن: فشل حديث = عقوبة كبيرة
             val decay = kotlin.math.exp(-lastFailAgeMin / 30.0)
             score -= failCount * 8.0 * decay
         }
-        // Sticky bonus: لا تدور mid-funnel بدون سبب — يُطبق في AppViewModel
+
+        --- Sticky bonus: لا تدور mid-funnel بدون سبب ---
+        // bonus for not rotating unnecessarily (applied in AppViewModel)
+
         return score.coerceIn(0.0, 100.0)
     }
 
@@ -551,8 +905,38 @@ object SmartAutomationBrain {
     }
 
     /** منفعة المهمة: تحويل متوقع في الساعة مقابل حرق البروكسي */
-    fun taskUtilityPerHour(successRate: Double, avgDurationSec: Int, proxyCost: Double = 1.0): Double {
+    fun taskUtilityPerHour(successRate: Double, avgDurationSec: Int, proxyCost: Double = 1.0, taskComplexity: Int = 0, proxyReliability: Double = 1.0): Double {
         if (avgDurationSec <= 0) return 0.0
-        return (successRate * 3600.0 / avgDurationSec) / proxyCost
+        val baseUtility = (successRate * 3600.0 / avgDurationSec) / proxyCost
+        val complexityPenalty = if (taskComplexity > 0) (taskComplexity * 0.5) else 0.0
+        val reliabilityFactor = if (proxyReliability > 0) proxyReliability else 1.0
+        return (baseUtility - complexityPenalty) / reliabilityFactor
+    }
+
+    /** تصنيف المهمة: difficulty level based on categories and steps */
+    fun taskDifficulty(categories: List<String>, steps: Int = 0): Int {
+        var difficulty = 1 // 1 = easy, 5 = very hard
+        if (categories.any { it.contains("locker", true) || it.contains("قفل") || it.contains("لوكر") }) difficulty += 2
+        if (categories.any { it.contains("offer_click", true) || it.contains("نقر") }) difficulty += 1
+        if (categories.any { it.contains("email", true) || it.contains("إيميل") }) difficulty += 1
+        difficulty += minOf(steps / 2, 2)
+        return difficulty.coerceIn(1, 5)
+    }
+
+    /** مدة مناسبة مع مراعى الذكاء التكيفي للجودة والصعوبة */
+    fun adaptiveDuration(baseDuration: Int, qualityScore: Int, difficulty: Int = 1): Int {
+        val qualityFactor = when {
+            qualityScore >= 85 -> 0.85 // High quality: can reduce duration significantly
+            qualityScore >= 60 -> 0.95 // Good quality: modest reduction
+            qualityScore >= 40 -> 1.0 // Normal
+            else -> 1.2 // Low quality: increase for careful handling
+        }
+        val difficultyFactor = when {
+            difficulty <= 2 -> 1.0 // Easy
+            difficulty == 3 -> 1.1 // Medium
+            difficulty == 4 -> 1.3 // Hard
+            else -> 1.5 // Very Hard: complex funnels need more time
+        }
+        return (baseDuration * qualityFactor * difficultyFactor).coerceAtMost(200)
     }
 }

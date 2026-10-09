@@ -526,16 +526,124 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 } else {
                     proxyDao.recordProxyFailure(proxy.id)
                 }
-            }
+}
             if (isWorking) {
                 val protoMsg = if (diag.protocol != proxy.type) " [بروتوكول: ${diag.protocol.uppercase()}]" else ""
                 val msg = "متصل: $exitIp (${ping}ms) - ${diag.city}, ${diag.country}$protoMsg (جودة: ${diag.qualityScore}/100)"
                 addLog("success", "✅ بروكسي ${proxy.host}:${proxy.port} يعمل بنجاح! $msg")
                 onResult(true, msg)
             } else {
-                addLog("error", "❌ بروكسي ${proxy.host}:${proxy.port} فشل: ${diag.errorMessage}")
+                addLog("error", "❌ بروكسي ${proxy.host}:${proxy.port} failed: ${diag.errorMessage}")
                 onResult(false, "فشل: ${diag.errorMessage}")
             }
+        }
+    }
+
+    // ── دوال管理 proxy enhanced ────────────────────────────────────
+    /**
+     * Select the best proxy using anti-detection intelligence
+     */
+    fun selectBestAntiDetectionProxy(): ProxyItem? {
+        val allProxies = proxyDao.getAllProxiesList()
+        if (allProxies.isEmpty()) return null
+
+        // Score each proxy using enhanced intelligence
+        return allProxies.maxBy { proxy ->
+            // Calculate comprehensive score
+            val baseScore = when {
+                proxy.status == "working" -> 100.0
+                proxy.status == "tested" -> 70.0
+                else -> 30.0
+            }
+            // Residential proxies get boost
+            + (if (proxy.isResidential) 25.0 else -15.0)
+            // Fresh proxies (recently tested) get boost
+            + if (proxy.lastTested != null && System.currentTimeMillis() - proxy.lastTested < 3600000) 20.0 else 0.0
+            // Low ping boost
+            + (if (proxy.ping != null && proxy.ping < 500) 15.0 else if (proxy.ping != null && proxy.ping < 2000) 5.0 else 0.0)
+            // High quality score boost
+            + (if (proxy.score != null && proxy.score > 80) 20.0 else if (proxy.score != null && proxy.score > 50) 10.0 else 0.0)
+        }
+    }
+
+    /**
+     * Validate proxy health using comprehensive checks
+     */
+    fun validateProxyHealthEnhanced(proxy: ProxyItem): Double {
+        return SmartAutomationBrain.validateProxyHealth(
+            successRate = (proxy.successCount ?: 0) / maxOf(1, (proxy.showCount ?: 1)),
+            avgPing = proxy.ping ?: 1000L,
+            failRate = (proxy.failCount ?: 0) / maxOf(1, (proxy.showCount ?: 1)),
+            blockRate = 0.0, // Will be updated from detection events
+            residentialRatio = if (proxy.isResidential) 1.0 else 0.0
+        )
+    }
+
+    /**
+     * Get proxy rotation strategy based on intelligence
+     */
+    fun getProxyRotationStrategy(): String = SmartAutomationBrain.smartProxyRotationStrategy(
+        currentProxyQuality = _automationState.value.sessionQualityScore / 100.0,
+        failCount = (taskFailureCount.values().sumOrNull(0) / maxOf(1, taskFailureCount.size)),
+        samePageRepeat = _automationState.value.consecutiveSamePage,
+        noProgress = _automationState.value.consecutiveNoProgress,
+        isResidential = _settings.value.proxyType?.contains("socks5") == true || false, //placeholder
+        sessionAgeMin = 0, //placeholder
+        lastBlockDetected = _automationState.value.phase == "error"
+    )
+
+    /**
+     * Apply proxy with maximum anti-detection precautions
+     */
+    fun applyProxyWithPrecautions(proxy: ProxyItem, userContext: Map<String, Any>? = null) {
+        viewModelScope.launch(Dispatchers.IO) {
+            // Test proxy first
+            IdentityService.testAndDetectProxy(
+                host = proxy.host,
+                port = proxy.port,
+                preferredType = proxy.type,
+                user = proxy.username,
+                pass = proxy.password,
+                timeoutMs = 15000
+            ).let { testResult ->
+                if (testResult.isWorking) {
+                    // Apply with anti-detection settings
+                    WebProxyManager.applyProxy(
+                        application,
+                        true,
+                        proxy.host,
+                        proxy.port.toInt(),
+                        proxy.type,
+                        proxy.username,
+                        proxy.password
+                    ) { success, msg ->
+                        if (success) {
+                            // Update proxy details with intelligence
+                            proxyDao.updateProxyFullDetails(
+                                id = proxy.id,
+                                status = "working",
+                                ping = testResult.pingMs,
+                                country = testResult.country,
+                                city = testResult.city,
+                                isp = testResult.isp,
+                                score = testResult.qualityScore,
+                                lastUsed = System.currentTimeMillis(),
+                                antiDetectionLevel = "high" // Mark as high anti-detection
+                            )
+                            addLog("success", "Applied anti-detection proxy: ${proxy.host}:${proxy.port}")
+                        } else {
+                            addLog("warning", "Proxy applied but with issues: $msg")
+                        }
+                    }
+                } else {
+                    // Mark proxy as detected and rotate
+                    proxyDao.markProxyFailed(proxy.id)
+                    addLog("warning", "Proxy detected/blocked: ${proxy.host}:${proxy.port} - rotating...")
+                }
+            }
+        }
+    }
+}
         }
     }
 
@@ -1320,7 +1428,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun recordTaskFailure(taskId: String, taskName: String, reason: String) {
         val c = (taskFailureCount[taskId] ?: 0) + 1
         taskFailureCount[taskId] = c
-        addLog("error", "❌ [لقطة فشل $c/$taskRetryLimit]: $taskName — $reason. تم حفظ السياق (URL/مرحلة/جودة=${_automationState.value.sessionQualityScore}).", taskName)
+        val qualityAtFail = _automationState.value.sessionQualityScore
+        addLog("error", "❌ [لقطة فشل $c/$taskRetryLimit]: $taskName — $reason. الجودة: $qualityAtFail", taskName)
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 leadLogDao.insertLog(
@@ -1330,14 +1439,29 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         ip = _automationState.value.activeIp,
                         country = _extractedInfo.value.country,
                         leadDetected = false,
-                        details = "FAILURE_SNAPSHOT: $reason | phase=${_automationState.value.phase} | brain=${_automationState.value.brainNextAction}"
+                        details = "FAILURE_SNAPSHOT: $reason | phase=${_automationState.value.phase} | quality=${qualityAtFail} | brain=${_automationState.value.brainNextAction}"
                     )
                 )
             } catch (_: Exception) {}
         }
+        // Auto-skip after consecutive failures reach threshold
+        if (c >= taskRetryLimit) {
+            _automationState.update {
+                it.copy(stuckCount = stuckCount + 1)
+            }
+            addLog("warning", "⏸️ تم تعطيل المهمة تلقائياً بعد $c فشل متتالي — سيتم تخطيها حتى إعادة التشغيل.")
+        }
     }
 
-    private fun shouldSkipTask(taskId: String): Boolean = (taskFailureCount[taskId] ?: 0) >= taskRetryLimit
+    private fun shouldSkipTask(taskId: String): Boolean {
+        val failureCount = (taskFailureCount[taskId] ?: 0)
+        return failureCount >= taskRetryLimit
+    }
+
+    // ── P2: reset failure count on successful task completion ──
+    private fun resetTaskFailureCount(taskId: String) {
+        taskFailureCount.remove(taskId)
+    }
 
     // ── Direct Nike runner: proxy OFF + Nike priority + GDFQO UTM task ──
     fun runGdfqoNikeTaskDirect() {
@@ -1511,7 +1635,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
 
-            // 1. Intelligent Task Resolution: ensure we have optimized tasks ready
+            // 1. Pre-flight validation: check critical requirements
+            addLog("info", "Smart Auto: Running pre-flight validation...")
+            val preflight = validatePreflight(taskDao.getEnabledTasks().size, emailDao.getNextEmail()?.let { 1 } ?: 0, offerClickDao.getEnabledClickItemsList().size)
+            preflight.forEach { addLog("warning", "🧪 [فحص ما قبل التشغيل]: $it") }
+
+            // Check for critical missing components that prevent safe startup
+            val hasEnablingTasks = taskDao.getEnabledTasks().isNotEmpty()
+            val hasClickItems = offerClickDao.getEnabledClickItemsList().isNotEmpty()
+            if (!hasEnablingTasks && !hasClickItems) {
+                addLog("error", "❌ لا يمكن بدء التشغيل: لا توجد مهام فعالة ولا نصوص نقرة متاحة.")
+                _automationState.update {
+                    it.copy(isRunning = false, phase = "completed", phaseDetail = "لا توجد مهام للنشغيل")
+                }
+                return@launch
+            }
+
+            // 2. Intelligent Task Resolution: ensure we have optimized tasks ready
             var tasksToRun = taskDao.getEnabledTasks()
             if (tasksToRun.isEmpty()) {
                 val allExisting = taskDao.getAllTasksList()
@@ -1614,11 +1754,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             continue
                         }
 
+                        // Start running task
+                        _automationState.update {
+                            it.copy(
+                                phase = "running_task",
+                                phaseDetail = "تنفيذ مهمة: ${task.name}",
+                                currentTaskId = task.id,
+                                currentTaskName = task.name,
+                                currentUrl = task.url
+                            )
+                        }
                         runSingleTask(task)
                         persistLearning()
 
                         // 🧠 Smart adaptive wait: quality-aware human rhythm
                         if (_automationState.value.isRunning) {
+                            _automationState.update {
+                                it.copy(phase = "wait_cycle", phaseDetail = "فاصل الراحة البشري...")
+                            }
                             val quality = _automationState.value.sessionQualityScore
                             val minWait = _settings.value.cycleIntervalMinSec.coerceAtLeast(12)
                             val maxWait = _settings.value.cycleIntervalMaxSec.coerceAtLeast(minWait)
@@ -1627,10 +1780,9 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                                 if (!_automationState.value.isRunning) break
                                 _automationState.update {
                                     it.copy(
-                                        phase = "preparing",
-                                        phaseDetail = "فاصل الدورة (${w} ث متبقية / 15-25 ث)...",
                                         cycleCountdown = w,
-                                        cycleTotalDuration = waitSec
+                                        cycleTotalDuration = waitSec,
+                                        phaseDetail = "فاصل الدورة (${w} ث متبقية / 15-25 ث)..."
                                     )
                                 }
                                 delay(1000)
@@ -1649,8 +1801,24 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             } catch (e: Exception) {
                 recordTaskFailure("campaign", "Smart Campaign", e.localizedMessage ?: "unknown")
                 addLog("error", "Automation error: ${e.localizedMessage}")
+                // Emergency state reset on critical error
+                _automationState.update {
+                    it.copy(
+                        isRunning = false,
+                        phase = "error",
+                        phaseDetail = "خطأ غير متوقع في الحملة",
+                        currentTaskId = null,
+                        currentTaskName = null,
+                        currentUrl = null
+                    )
+                }
             } finally {
                 persistLearning()
+                // Record campaign summary metrics
+                val finalTasks = taskDao.getEnabledTasks()
+                val completedTasks = finalTasks.count { it.completedRuns > 0 }
+                val totalDuration = (System.currentTimeMillis() - automationStartTime).coerceAtLeast(0L)
+                addLog("info", "📊 [ملخص الحملة]: ${completedTasks} مهمة مكتملة من ${finalTasks.size} مهمة — المدة الإجمالية: ${totalDuration / 1000} ث.")
                 _automationState.update {
                     it.copy(
                         isRunning = false,
@@ -2079,17 +2247,54 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 phaseDetail = "Completed run for ${task.name}. Page preserved. | معدل التحويل: $rate%"
             )
         }
+        // 📊 Detailed learning & outcome logging with full metrics
+        val converted = completionReceivedForCurrentTask ||
+            _automationState.value.brainNextAction == SmartAutomationBrain.NextAction.COMPLETE_CONVERSION.code
+        SmartAutomationBrain.recordOutcome(taskLearning, task.id, converted)
+        persistLearning()
+        val rate = taskLearning[task.id]?.let { (it.successRate * 100).toInt() } ?: 50
+        // P0 ledger: stuck without conversion counts toward retry limit (poison-task guard)
+        if (!converted && _automationState.value.stuckCount >= 4) {
+            recordTaskFailure(task.id, task.name, "تعليق متكرر بلا تقدم (${_automationState.value.stuckCount}) وبلا تحويل")
+        } else if (converted) {
+            resetTaskFailureCount(task.id)
+            // 📈 Conversion detail log with full context
+            val geoAtConvert = _extractedInfo.value
+            addLog("success", "🏆 [تحويل ناجح]: ${task.name} — الجودة: ${_automationState.value.sessionQualityScore}% | الموقع: ${geoAtConvert.url ?: "N/A"} | البلد: ${geoAtConvert.country ?: "N/A"} | IP: ${geoAtConvert.ip ?: "N/A"}", task.name)
+            // Log detailed conversion components
+            if (geoAtConvert.ip.isNotBlank()) addLog("info", "   - IP Address: ${geoAtConvert.ip}", task.name)
+            if (geoAtConvert.country.isNotBlank()) addLog("info", "   - Country: ${geoAtConvert.country}", task.name)
+            if (_automationState.value.leadsThisSession > 0) addLog("info", "   - Conversions this session: ${_automationState.value.leadsThisSession}", task.name)
+        } else {
+            addLog("warning", "📝 [لا تحويل]: ${task.name} — سيتم التعلم من الفشل (${_automationState.value.stuckCount} تعليقات)", task.name)
+        }
+
+        // Increment task run count
+        taskDao.incrementCompletedRuns(task.id)
+        taskDao.updateTaskStatus(task.id, "completed")
+        _automationState.update {
+            it.copy(
+                completedThisSession = it.completedThisSession + 1,
+                phase = "completed",
+                phaseDetail = "Completed run for ${task.name}. Page preserved. | معدل التحويل: $rate%"
+            )
+        }
         addLog(if (converted) "success" else "info", "🧠 [تعلم]: ${task.name} → تحويل=${if (converted) "نعم ✅" else "لا"} | معدل النجاح التراكمي: $rate% (${taskLearning[task.id]?.runs} runs)", task.name)
     }
 
     private suspend fun runMode1(task: TaskEntity) {
         val duration = task.browserDuration.coerceAtLeast(5)
+        addLog("info", "🚀 Mode 1 started: ${duration}s browsing session for ${task.name}", task.name)
         for (sec in duration downTo 1) {
             if (!_automationState.value.isRunning) break
             // 🧠 Early smart exit: conversion already confirmed → don't waste time
             if (completionReceivedForCurrentTask) {
                 addLog("success", "🧠 [خروج مبكر ذكي]: تم التحويل — إنهاء العدّاد (${sec}s متبقية) فوراً.", task.name)
                 break
+            }
+            // 📝 Log every 5 seconds and final 5 seconds for visibility
+            if (sec % 5 == 0 || sec <= 5) {
+                addLog("info", "⏳ Mode 1 counting: ${sec}s remaining (${if (completionReceivedForCurrentTask) "✅ تحويل متوقع" else "⏳ في انتظار"}...)", task.name)
             }
             val brainHint = _automationState.value.smartDecisionTitle.takeIf { it.isNotBlank() }?.let { " | 🧠 $it" } ?: ""
             val stuckWarn = if (_automationState.value.stuckCount >= 2) " ⚠️ تعليق (${_automationState.value.stuckCount})" else ""
@@ -2101,11 +2306,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
             delay(1000)
         }
+        // Mode 1 session end summary
+        if (_automationState.value.isRunning) {
+            addLog("warning", "⏰ Mode 1 ended without explicit conversion — سيتم فحص الحالة وتعلم العقل من النتيجة.", task.name)
+        }
     }
 
     private suspend fun runMode2(task: TaskEntity, ua: String) {
         val repeats = task.taskRepeatCount.coerceAtLeast(1)
         val durationPerRepeat = (task.taskDuration / repeats).coerceAtLeast(5)
+        addLog("info", "🚀 Mode 2 started: ${repeats} repeats × ${durationPerRepeat}s each for ${task.name}", task.name)
 
         for (r in 1..repeats) {
             if (!_automationState.value.isRunning) break
@@ -2117,8 +2327,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 addLog("info", "Mode 2 repeat #$r: Reloading task in same session", task.name)
                 _browserCommand.value = BrowserCommand.LoadUrl(task.url, task.referer, ua)
             }
+            addLog("info", "▶️ Mode 2 repeat #$r started: ${durationPerRepeat}s browsing", task.name)
             for (sec in durationPerRepeat downTo 1) {
                 if (!_automationState.value.isRunning || completionReceivedForCurrentTask) break
+                // 📝 Log every 5 seconds and final 5 seconds for visibility
+                if (sec % 5 == 0 || sec <= 5) {
+                    addLog("info", "⏳ Mode 2 repeat #$r: ${sec}s remaining", task.name)
+                }
                 val brainHint = _automationState.value.smartDecisionTitle.takeIf { it.isNotBlank() }?.let { " | 🧠 $it" } ?: ""
                 _automationState.update {
                     it.copy(
@@ -2128,6 +2343,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 delay(1000)
             }
+            // Repeat end summary
+            if (_automationState.value.isRunning && !completionReceivedForCurrentTask) {
+                addLog("warning", "⏰ Mode 2 repeat #$r ended without conversion", task.name)
+            }
+        }
+        // Mode 2 session end summary
+        if (_automationState.value.isRunning && !completionReceivedForCurrentTask) {
+            addLog("warning", "⏰ Mode 2 session ended without explicit conversion", task.name)
         }
     }
 
@@ -2138,12 +2361,18 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val keywords = SmartAutomationBrain.confirmKeywordsSmart(task.completionKeywords)
         addLog("info", "🧠 Mode 3 smart listening (${keywords.size} إشارة): ${keywords.take(5).joinToString(", ")}", task.name)
 
+        addLog("info", "⏳ Mode 3 started: waiting up to ${maxWaitSec}s for conversion signal", task.name)
+
         for (sec in 1..maxWaitSec) {
             if (!_automationState.value.isRunning || completionReceivedForCurrentTask) break
             // 🧠 If brain already decided COMPLETE, exit even before bridge callback
             if (_automationState.value.brainNextAction == SmartAutomationBrain.NextAction.COMPLETE_CONVERSION.code) {
                 completionReceivedForCurrentTask = true
                 break
+            }
+            // 📝 Log every 10 seconds and final 10 seconds
+            if (sec % 10 == 0 || sec >= maxWaitSec - 9) {
+                addLog("info", "⏳ Mode 3 waiting: ${maxWaitSec - sec}s remaining (${if (completionReceivedForCurrentTask) "✅ تم الكشف" else "⏳ ما زلنا ننتظر"}...)", task.name)
             }
             val brainHint = _automationState.value.smartDecisionTitle.takeIf { it.isNotBlank() }?.let { " | 🧠 $it" } ?: ""
             _automationState.update {
@@ -2158,7 +2387,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (completionReceivedForCurrentTask) {
             addLog("success", "🧠 Smart Mode detected conversion early (keyword + brain consensus)!", task.name)
         } else {
-            addLog("warning", "Smart Mode timeout — سيُسجَّل كغير محوّل ويتعلم العقل من ذلك.", task.name)
+            addLog("warning", "⏰ Mode 3 timeout (${maxWaitSec}s) — سيُسجَّل كغير محوّل ويعلم العقل من ذلك", task.name)
         }
     }
 
@@ -2279,6 +2508,319 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             workTemplateDao.deleteTemplate(template)
             addLog("warning", "تم حذف قالب العمل: ${template.name}")
         }
+    }
+
+    // ── طبقة التحليل الشامل للذكاء الاصطناعي الشامل ──────────────────────
+    // This layer provides system-wide AI analysis across all automation components
+    // It integrates brain insights, task learning, proxy performance, and campaign metrics
+    // to provide strategic recommendations and predictive analytics.
+
+    /**
+     * تحليل أداء المهمة الشامل - Comprehensive Task Performance Analysis
+     * تحليل أداء المهمة مع جميع المقاييس المتاحة وتوصيات التحسين
+     */
+    fun analyzeTaskPerformance(taskId: String): Map<String, Any> {
+        return viewModelScope.async(Dispatchers.IO) {
+            try {
+                val task = taskDao.getTaskById(taskId) ?: emptyMap()
+                val learningStats = taskLearning[taskId] ?: SmartAutomationBrain.TaskLearningStats(taskId)
+                val taskCategory = TaskCategoryPlanner.parseCategories(task["categories"] ?: "")
+                val difficulty = SmartAutomationBrain.taskDifficulty(
+                    task["categories"] ?: "",
+                    task["browserDuration"]?.toInt() ?: 0
+                )
+                val utility = SmartAutomationBrain.taskUtilityPerHour(
+                    learningStats.successRate,
+                    (task["browserDuration"]?.toInt() ?: 30),
+                    1.0,
+                    difficulty,
+                    1.0
+                )
+                val adaptiveDur = SmartAutomationBrain.adaptiveDuration(
+                    task["browserDuration"]?.toInt() ?: 30,
+                    learningStats.successRate * 100,
+                    difficulty
+                )
+
+                // Compute session quality with all factors
+                val sessionQuality = SmartAutomationBrain.sessionQuality(
+                    memory = BrainMemory(), // will be populated from state in real implementation
+                    conversions = learningStats.conversions,
+                    runs = learningStats.runs,
+                    taskDiversity = 3, // placeholder
+                    proxyQuality = 1.0 // placeholder
+                )
+
+                mapOf(
+                    "taskId" to taskId,
+                    "taskName" to task["name"] ?: "Unknown",
+                    "successRate" to learningStats.successRate,
+                    "totalRuns" to learningStats.runs,
+                    "totalConversions" to learningStats.conversions,
+                    "conversionRate" to if (learningStats.runs > 0) (learningStats.conversions.toDouble() / learningStats.runs * 100).toInt() else 0,
+                    "difficultyLevel" to difficulty,
+                    "taskUtilityPerHour" to utility,
+                    "adaptiveDurationSeconds" to adaptiveDur,
+                    "sessionQualityScore" to sessionQuality,
+                    "recommendedActions" to computeTaskRecommendations(task, learningStats, difficulty),
+                    "lastAnalyzed" to System.currentTimeMillis(),
+                    "analysisType" to "comprehensive_task_performance"
+                )
+            } catch (e: Exception) {
+                addLog("error", "تحليل أداء المهمة فشل: ${e.message}", taskId)
+                emptyMap()
+            }
+        }.awaitFirstOrNull() ?: emptyMap()
+    }
+
+    /**
+     * Compute strategic recommendations for a task
+     */
+    private fun computeTaskRecommendations(
+        task: Map<String, Any>,
+        learning: SmartAutomationBrain.TaskLearningStats,
+        difficulty: Int
+    ): List<String> {
+        val recommendations = mutableListOf<String>()
+        if (learning.runs < 3) {
+            recommendations.add("مهمة جديدة —monitoring closely for first 3 runs")
+        }
+        if (learning.successRate < 0.3) {
+            recommendations.add("معدل نجاح منخفض —Consider task difficulty adjustment or proxy change")
+        }
+        if (learning.successRate > 0.7 && learning.runs > 10) {
+            recommendations.add("مهمة ناجحة —يمكن تقليص المدة أو زيادة التكرار")
+        }
+        if (difficulty >= 4) {
+            recommendations.add(" مهمة معقدة —تأكد من جودة البروكسي وقدّر المدة المناسبة")
+        }
+        if (recommendations.isEmpty()) {
+            recommendations.add("الأداء طبيعي —متابعة الوضع الحالي")
+        }
+        return recommendations
+    }
+
+    /**
+     * تحليل حملة ذكي شامل - Smart Campaign Wide Analysis
+     * تحليل أداء الحملة بالكامل مع تنبؤات وتوصيات استراتيجية
+     */
+    fun analyzeCampaignWide(): Map<String, Any> {
+        return viewModelScope.async(Dispatchers.IO) {
+            try {
+                val allTasks = taskDao.getAllTasksList()
+                val enabledTasks = taskDao.getEnabledTasks()
+                val totalTasks = allTasks.size
+                val activeTasks = enabledTasks.size
+
+                // Collect learning stats for all tasks
+                val learningStatsMap = mutableMapOf<String, SmartAutomationBrain.TaskLearningStats>()
+                val totalRuns = atomicInteger(0)
+                val totalConversions = atomicInteger(0)
+
+                enabledTasks.forEach { task ->
+                    val stats = taskLearning[task.id] ?: SmartAutomationBrain.TaskLearningStats(task.id)
+                    learningStatsMap[task.id] = stats
+                    totalRuns.addAndGet(stats.runs)
+                    totalConversions.addAndGet(stats.conversions)
+                }
+
+                // Overall campaign metrics
+                val overallConversionRate = if (totalRuns.get() > 0) {
+                    (totalConversions.toDouble() / totalRuns.get() * 100).toInt()
+                } else 0
+
+                // Task difficulty distribution
+                val difficultyDist = mutableMapOf<Int, Int>()
+                allTasks.forEach { task ->
+                    val d = SmartAutomationBrain.taskDifficulty(task.categories, task.browserDuration)
+                    difficultyDist[d] = (difficultyDist[d] ?: 0) + 1
+                }
+
+                // Proxy performance analysis (from state)
+                val avgQualityScore = _automationState.value.sessionQualityScore
+                val stuckTasks = enabledTasks.count { task ->
+                    // Check if task has high failure count
+                    (taskFailureCount[task.id] ?: 0) >= (taskRetryLimit ?: 3)
+                }
+
+                // Strategy recommendations
+                val recommendations = mutableListOf<String>()
+                if (stuckTasks > 0) {
+                    recommendations.add("$stuckTasks مهمة متعثرة —تغيير الاستراتيجية أو البروكسي")
+                }
+                if (overallConversionRate < 20) {
+                    recommendations.add("معدل تحويل الحملة منخفض —مراجعة الفانات وتغيير البروكسي")
+                }
+                if (overallConversionRate > 50 && totalRuns.get() > 20) {
+                    recommendations.add("حملة ناجحة —يمكن زيادة عدد المهام أو التكرار")
+                }
+                if (difficultyDist.values.any { it > totalTasks * 0.6 }) {
+                    recommendations.add("معظم المهام صعبة —تحقق من إعدادات البروكسي وفاناتات الهدف")
+                }
+
+                mapOf(
+                    "overallConversionRate" to overallConversionRate,
+                    "totalTasks" to totalTasks,
+                    "activeTasks" to activeTasks,
+                    "totalRuns" to totalRuns.get(),
+                    "tasksAnalysis" to learningStatsMap.mapValues { (id, stats) ->
+                        mapOf(
+                            "id" to id,
+                            "name" to taskDao.getTaskById(id)?.name ?: id,
+                            "runs" to stats.runs,
+                            "conversions" to stats.conversions,
+                            "successRate" to stats.successRate
+                        )
+                    },
+                    "difficultyDistribution" to difficultyDist.mapValues { "level $it" to it },
+                    "avgSessionQuality" to avgQualityScore,
+                    "stuckTaskCount" to stuckTasks,
+                    "campaignRecommendations" to recommendations,
+                    "lastAnalyzed" to System.currentTimeMillis(),
+                    "analysisType" to "campaign_wide_intelligence"
+                )
+            } catch (e: Exception) {
+                addLog("error", "تحليل الحملة الشامل فشل: ${e.message}")
+                emptyMap()
+            }
+        }.awaitFirstOrNull() ?: emptyMap()
+    }
+
+    /**
+     * تنبؤات استراتيجية ذكية - Strategic Predictions
+     * تنبؤات بالأداء المستقبلي بناءً على الأنماط الحالية
+     */
+    fun predictFuturePerformance(horizonDays: Int = 7): Map<String, Any> {
+        return viewModelScope.async(Dispatchers.IO) {
+            try {
+                val enabledTasks = taskDao.getEnabledTasks()
+                val totalTasks = enabledTasks.size
+
+                // Calculate current trends
+                val totalCurrentRuns = enabledTasks.sumOf { taskLearning[it.id]?.runs ?: 0 }
+                val totalCurrentConversions = enabledTasks.sumOf { taskLearning[it.id]?.conversions ?: 0 }
+                val currentRate = if (totalCurrentRuns > 0) (totalCurrentConversions.toDouble() / totalCurrentRuns * 100) else 0
+
+                // Predict based on current trajectory
+                val predictedRate = when {
+                    currentRate >= 70 -> currentRate + (70 - currentRate) * 0.1 // converge to 70
+                    currentRate >= 50 -> currentRate + 5 // slight increase
+                    currentRate >= 30 -> currentRate + 3 // modest increase
+                    else -> currentRate + 2 // recovery start
+                }.coerceIn(0, 100)
+
+                // Resource predictive analysis
+                val predictedStuck = when {
+                    currentRate < 30 && totalCurrentRuns > 10 -> totalTasks * 0.3
+                    currentRate < 50 && totalCurrentRuns > 5 -> totalTasks * 0.15
+                    else -> totalTasks * 0.05
+                }.toInt()
+
+                val resourceEfficiency = when {
+                    currentRate >= 60 && totalCurrentRuns > 20 -> "high"
+                    currentRate >= 40 && totalCurrentRuns > 10 -> "medium"
+                    else -> "low"
+                }
+
+                // Actionable predictions
+                val predictions = mutableListOf<String>()
+                if (predictedRate > 60) {
+                    predictions.add("من المتوقع تحسين معدل التحويل إلى ${predictedRate.toInt()}% خلال ${horizonDays} أيام")
+                }
+                if (predictedStuck > 0) {
+                    predictions.add("من المتوقع ${predictedStuck} مهمة متعثرة —ينصح بتغيير الاستراتيجية")
+                }
+                if (resourceEfficiency == "low") {
+                    predictions.add("كفاءة موارد منخفضة —ينصح مراجعة إعدادات البروكسي")
+                }
+                if (predictedRate < 30 && resourceEfficiency == "low") {
+                    predictions.add("تحذير: الحملة في خطر —ينصح إعادة هيكلة فورية")
+                }
+
+                mapOf(
+                    "currentConversionRate" to currentRate,
+                    "predictedRateInDays" to predictedRate,
+                    "horizonDays" to horizonDays,
+                    "predictedStuckTasks" to predictedStuck,
+                    "resourceEfficiency" to resourceEfficiency,
+                    "predictions" to predictions,
+                    "analysisTimestamp" to System.currentTimeMillis(),
+                    "analysisType" to "strategic_predictions"
+                )
+            } catch (e: Exception) {
+                addLog("error", "التنبؤات الاستراتيجية فشلت: ${e.message}")
+                emptyMap()
+            }
+        }.awaitFirstOrNull() ?: emptyMap()
+    }
+
+    /**
+     * تحسين ذكي للكل - Maximum Intelligence Optimization
+     * تطبيق جميع التحسينات الذكية المتاحة على الحالة الحالية
+     */
+    fun applyMaximumIntelligenceOptimization(): Map<String, Any> {
+        return viewModelScope.async(Dispatchers.IO) {
+            try {
+                val enabledTasks = taskDao.getEnabledTasks()
+                val analysisResults = mutableMapOf<String, Any>()
+
+                // 1. Analyze each task comprehensively
+                val taskAnalyses = enabledTasks.associate { task ->
+                    val analysis = analyzeTaskPerformance(task.id)
+                    task.id to analysis
+                }
+                analysisResults["perTaskAnalysis"] = taskAnalyses
+
+                // 2. Campaign wide analysis
+                val campaignAnalysis = analyzeCampaignWide()
+                analysisResults["campaignAnalysis"] = campaignAnalysis
+
+                // 3. Strategic predictions
+                val predictions = predictFuturePerformance()
+                analysisResults["strategicPredictions"] = predictions
+
+                // 4. Synthesize optimal settings recommendations
+                val allRates = taskAnalyses.values.map { it["successRate"] as? Double ?: 0.5 }
+                val avgRate = allRates.average() ?: 0.5
+                val highDifficultyTasks = enabledTasks.count { task ->
+                    SmartAutomationBrain.taskDifficulty(task.categories, task.browserDuration) >= 4
+                }
+                val lowQualityTasks = enabledTasks.count { task ->
+                    (taskFailureCount[task.id] ?: 0) >= (taskRetryLimit ?: 3)
+                }
+
+                val optimalRecommendations = mutableListOf<String>()
+                if (avgRate > 0.6) {
+                    optimalRecommendations.add("معدل النجاح العام ممتاز —يمكن الحفاظ على الإعدادات الحالية")
+                }
+                if (avgRate < 0.3) {
+                    optimalRecommendations.add("معدل النجاح منخفض —ينصح مراجعة شاملة للمهام والبروكسي")
+                }
+                if (highDifficultyTasks > 0) {
+                    optimalRecommendations.add("$highDifficultyTasks مهمة صعبة —تحقق من مطابقة البروكسي وتعقيد الفانل")
+                }
+                if (lowQualityTasks > 0) {
+                    optimalRecommendations.add("$lowQualityTasks مهمة بحاجة لتغيير —اعادة تقييم وفشل متتالي")
+                }
+                // Adaptive delay recommendation
+                val avgQuality = _automationState.value.sessionQualityScore
+                val delayFactor = when {
+                    avgQuality >= 80 -> 0.8 // high quality: reduce waits
+                    avgQuality >= 50 -> 1.0 // normal
+                    else -> 1.3 // low quality: increase waits for stability
+                }
+                optimalRecommendations.add("عامل التأخير المقترح: $delayFactor (بناءً على جودة الجلسة $avgQuality%)")
+
+                analysisResults["optimalRecommendations"] = optimalRecommendations
+                analysisResults["synthesisTimestamp"] = System.currentTimeMillis()
+                analysisResults["optimizationLevel"] to "maximum"
+
+                return analysisResults
+            } catch (e: Exception) {
+                addLog("error", "التحسين الأقصى للذكاء فشل: ${e.message}")
+                emptyMap()
+            }
+        }.awaitFirstOrNull() ?: emptyMap()
     }
 }
 
